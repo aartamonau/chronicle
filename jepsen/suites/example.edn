@@ -1,0 +1,9 @@
+[{:workload :register}
+ {:workload :addremove}
+ {:workload :crash}
+ {:workload :failover}
+ {:workload :majorityfailover}
+ {:workload :freeze}
+ {:workload :partition}
+ {:workload :disk}
+ {:workload :mixed}]
