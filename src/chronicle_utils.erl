@@ -56,10 +56,6 @@
 
 -export_type([batch/0, send_options/0, send_result/0, multi_call_result/2]).
 
--ifdef(HAVE_SYNC_DIR).
--on_load(init_sync_nif/0).
--endif.
-
 groupby_map(Fun, List) ->
     lists:foldl(
       fun (Elem, Acc) ->
@@ -590,49 +586,13 @@ is_quorum_feasible(Peers, FailedVotes, Quorum) ->
 
 -ifdef(HAVE_SYNC_DIR).
 
-init_sync_nif() ->
-    ?WHEN_LOAD_NIFS(
-       begin
-           PrivDir = case code:priv_dir(?MODULE) of
-                         {error, _} ->
-                             EbinDir = filename:dirname(code:which(?MODULE)),
-                             AppPath = filename:dirname(EbinDir),
-                             filename:join(AppPath, "priv");
-                         Path ->
-                             Path
-                     end,
-           erlang:load_nif(filename:join(PrivDir, "sync_nif"), 0)
-       end).
-
-encode_path(Path) ->
-    Encoded =
-        if
-            is_binary(Path) ->
-                Path;
-            is_list(Path) ->
-                case file:native_name_encoding() of
-                    latin1 ->
-                        list_to_binary(Path);
-                    utf8 ->
-                        case unicode:characters_to_nfc_binary(Path) of
-                            {error, _, _} ->
-                                error(badarg);
-                            Binary ->
-                                Binary
-                        end
-                end;
-            true ->
-                error(badarg)
-        end,
-
-    %% Null-terminate.
-    <<Encoded/binary, 0>>.
-
 sync_dir(Path) ->
-    ?WHEN_LOAD_NIFS(do_sync_dir(encode_path(Path))).
-
-do_sync_dir(_Path) ->
-    erlang:nif_error(sync_nif_not_loaded).
+    case file:open(Path, [directory, raw]) of
+        {ok, Fd} ->
+            file:sync(Fd);
+        {error, _} = Error ->
+            Error
+    end.
 
 -else.                                          % -ifdef(HAVE_SYNC_DIR)
 

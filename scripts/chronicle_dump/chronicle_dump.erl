@@ -334,7 +334,6 @@ setup_logger() ->
 
 -spec main(list()) -> no_return().
 main(Args) ->
-    persistent_term:put(?CHRONICLE_LOAD_NIFS, false),
     setup_logger(),
 
     case Args of
