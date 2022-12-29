@@ -38,8 +38,9 @@
                           send/3,
                           term_number/1]).
 
--define(SERVER, ?SERVER_NAME(?MODULE)).
--define(SERVER(Peer), ?SERVER_NAME(Peer, ?MODULE)).
+-define(NAME, ?MODULE).
+-define(SERVER, ?SERVER_NAME(?NAME)).
+-define(SERVER(Peer), ?SERVER_NAME(Peer, ?NAME)).
 
 -define(TABLE, ?ETS_TABLE(?MODULE)).
 -define(MAX_BACKOFF,
@@ -133,11 +134,11 @@ announce_leader_status() ->
     gen_statem:cast(?SERVER, announce_leader_status).
 
 request_vote(Peers, Candidate, HistoryId, Position) ->
-    chronicle_utils:send_requests(Peers, ?MODULE,
+    chronicle_utils:send_requests(Peers, ?NAME,
                                   {request_vote, Candidate, HistoryId, Position}).
 
 check_member(Peers, HistoryId, Peer, PeerId, PeerSeqno) ->
-    chronicle_utils:send_requests(Peers, ?MODULE,
+    chronicle_utils:send_requests(Peers, ?NAME,
                                   {check_member, HistoryId,
                                    Peer, PeerId, PeerSeqno}).
 
