@@ -133,8 +133,8 @@ announce_leader_status() ->
     gen_statem:cast(?SERVER, announce_leader_status).
 
 request_vote(Peers, Candidate, HistoryId, Position) ->
-    call_async_many(Peers, {request_vote, Candidate, HistoryId, Position}).
-
+    chronicle_utils:send_requests(Peers, ?MODULE,
+                                  {request_vote, Candidate, HistoryId, Position}).
 call_async(Peer, Call) ->
     ServerRef = ?SERVER(Peer),
     MRef = chronicle_utils:monitor_process(ServerRef),
@@ -901,9 +901,9 @@ do_election_worker() ->
                     ?INFO("I'm the only peer, so I'm the leader."),
                     {ok, Leader, HistoryId, LatestTerm};
                 false ->
-                    Refs = request_vote(OtherPeers,
-                                        Leader, HistoryId, Position),
-                    case election_worker_loop(Refs,
+                    ReqIds = request_vote(OtherPeers,
+                                          Leader, HistoryId, Position),
+                    case election_worker_loop(ReqIds,
                                               Quorum, [Leader], LatestTerm) of
                         {ok, FinalTerm} ->
                             {ok, Leader, HistoryId, FinalTerm};
@@ -915,20 +915,19 @@ do_election_worker() ->
             {error, {not_voter, Leader, Peers}}
     end.
 
-election_worker_loop(Refs, _Quorum, Votes, Term)
-  when map_size(Refs) =:= 0 ->
-    {error, {no_quorum, Votes, Term}};
-election_worker_loop(Refs, Quorum, Votes, Term) ->
-    {Ref, Result} =
-        receive
-            {RespRef, _} = Resp when is_reference(RespRef) ->
-                Resp;
-            {'DOWN', DownRef, process, _Pid, Reason} ->
-                {DownRef, {error, {down, Reason}}}
-        end,
+election_worker_loop(ReqIds, Quorum, Votes, Term) ->
+    case gen_statem:receive_response(ReqIds, infinity, true) of
+        no_request ->
+            {error, {no_quorum, Votes, Term}};
+        {Response, Peer, NewReqIds} ->
+            Result =
+                case Response of
+                    {reply, Reply} ->
+                        Reply;
+                    {error, {Reason, _}} ->
+                        {error, {down, chronicle_utils:sanitize_reason(Reason)}}
+                end,
 
-    case maps:take(Ref, Refs) of
-        {Peer, NewRefs} ->
             case Result of
                 {ok, PeerTerm} ->
                     NewVotes = [Peer | Votes],
@@ -936,48 +935,36 @@ election_worker_loop(Refs, Quorum, Votes, Term) ->
 
                     case have_quorum(NewVotes, Quorum) of
                         true ->
-                            election_worker_extra_wait(NewTerm, NewRefs);
+                            election_worker_extra_wait(NewTerm, NewReqIds);
                         false ->
-                            election_worker_loop(NewRefs,
+                            election_worker_loop(NewReqIds,
                                                  Quorum, NewVotes, NewTerm)
                     end;
-                {error, _} = Error ->
-                    ?DEBUG("Failed to get leader vote from ~p: ~p",
-                           [Peer, Error]),
-                    election_worker_loop(NewRefs, Quorum, Votes, Term)
-            end;
-        error ->
-            %% Possible if we got a DOWN message from the peer, but it did end
-            %% up sending a response to us and it got delivered.
-            election_worker_loop(Refs, Quorum, Votes, Term)
+                Error ->
+                    ?DEBUG("Failed to get leader vote from ~p: ~p", [Peer, Error]),
+                    election_worker_loop(NewReqIds, Quorum, Votes, Term)
+            end
     end.
 
-election_worker_extra_wait(Term, Refs) ->
-    erlang:send_after(?EXTRA_WAIT_TIME, self(), extra_wait_timeout),
-    election_worker_extra_wait_loop(Term, Refs).
+election_worker_extra_wait(Term, ReqIds) ->
+    Deadline = erlang:monotonic_time(millisecond) + ?EXTRA_WAIT_TIME,
+    election_worker_extra_wait_loop(Term, ReqIds, {abs, Deadline}).
 
-election_worker_extra_wait_loop(Term, Refs) ->
-    case maps:size(Refs) =:= 0 of
-        true ->
+election_worker_extra_wait_loop(Term, ReqIds, Timeout) ->
+    case gen_statem:receive_response(ReqIds, Timeout, true) of
+        no_request ->
             {ok, Term};
-        false ->
-            receive
-                {Ref, Response} when is_reference(Ref) ->
-                    NewRefs = maps:remove(Ref, Refs),
-                    NewTerm =
-                        case Response of
-                            {ok, PeerTerm} ->
-                                max(Term, PeerTerm);
-                            {error, _} ->
-                                Term
-                        end,
-                    election_worker_extra_wait_loop(NewTerm, NewRefs);
-                {'DOWN', Ref, process, _Pid, _Reason} ->
-                    NewRefs = maps:remove(Ref, Refs),
-                    election_worker_extra_wait_loop(Term, NewRefs);
-                extra_wait_timeout ->
-                    {ok, Term}
-            end
+        timeout ->
+            {ok, Term};
+        {Response, _, NewReqIds} ->
+            NewTerm =
+                case Response of
+                    {reply, {ok, PeerTerm}} ->
+                        max(Term, PeerTerm);
+                    _ ->
+                        Term
+                end,
+            election_worker_extra_wait_loop(NewTerm, NewReqIds, Timeout)
     end.
 
 handle_send_heartbeat(State, Data) ->
