@@ -233,67 +233,43 @@ multi_call(Peers, Name, Request, Timeout) ->
                  timeout()) ->
           multi_call_result().
 multi_call(Peers, Name, Request, OkPred, Timeout) ->
-    Parent = self(),
-
-    run_on_process(
-      fun () ->
-              ParentMRef = erlang:monitor(process, Parent),
-              TRef = make_ref(),
-
-              case Timeout of
-                  infinity ->
-                      ok;
-                  _ when is_integer(Timeout) ->
-                      erlang:send_after(Timeout, self(), TRef),
-                      ok
-              end,
-
-              Refs = multi_call_send(Peers, Name, Request),
-              multi_call_recv(Refs, ParentMRef, TRef, OkPred, #{}, #{})
-      end).
+    Deadline = erlang:monotonic_time(millisecond) + Timeout,
+    ReqIds = multi_call_send(Peers, Name, Request),
+    multi_call_recv(ReqIds, {abs, Deadline}, OkPred, #{}, #{}).
 
 multi_call_send(Peers, Name, Request) ->
     lists:foldl(
-      fun (Peer, Acc) ->
+      fun (Peer, ReqIds) ->
               ServerRef = ?SERVER_NAME(Peer, Name),
-              MRef = monitor_process(ServerRef),
-              call_async(ServerRef, MRef, Request, [noconnect]),
-              Acc#{MRef => Peer}
-      end, #{}, Peers).
+              gen_statem:send_request(ServerRef, Request, Peer, ReqIds)
+      end, gen_statem:reqids_new(), Peers).
 
-multi_call_recv(Refs, _ParentMRef, _TRef, _OkPred, AccOk, AccBad)
-  when map_size(Refs) =:= 0 ->
-    {AccOk, AccBad};
-multi_call_recv(Refs, ParentMRef, TRef, OkPred, AccOk, AccBad) ->
-    receive
-        {Ref, PeerResult} when is_reference(Ref) ->
-            case maps:take(Ref, Refs) of
-                {Peer, NewRefs} ->
-                    {NewAccOk, NewAccBad} =
-                        case OkPred(PeerResult) of
-                            true ->
-                                {AccOk#{Peer => PeerResult}, AccBad};
-                            false ->
-                                {AccOk, AccBad#{Peer => PeerResult}}
-                        end,
-                    multi_call_recv(NewRefs, ParentMRef,
-                                    TRef, OkPred, NewAccOk, NewAccBad);
-                error ->
-                    multi_call_recv(Refs, ParentMRef,
-                                    TRef, OkPred, AccOk, AccBad)
-            end;
-        TRef ->
+multi_call_recv(ReqIds, Timeout, OkPred, AccOk, AccBad) ->
+    case gen_statem:receive_response(ReqIds, Timeout, true) of
+        no_request ->
+            {AccOk, AccBad};
+        timeout ->
             NewAccBad =
-                maps:fold(fun (_, Peer, Acc) ->
-                                  Acc#{Peer => timeout}
-                          end, AccBad, Refs),
+                lists:foldl(fun ({_, Peer}, Acc) ->
+                                    Acc#{Peer => timeout}
+                            end, AccBad, gen_statem:reqids_to_list(ReqIds)),
             {AccOk, NewAccBad};
-        {'DOWN', ParentMRef, _, _, _} ->
-            exit(normal);
-        {'DOWN', Ref, _, _, Reason} ->
-            {Peer, NewRefs} = maps:take(Ref, Refs),
-            NewAccBad = AccBad#{Peer => {down, sanitize_reason(Reason)}},
-            multi_call_recv(NewRefs, ParentMRef, TRef, OkPred, AccOk, NewAccBad)
+        {Response, Peer, NewReqIds} ->
+            case Response of
+                {reply, Reply} ->
+                    {NewAccOk, NewAccBad} =
+                        case OkPred(Reply) of
+                            true ->
+                                {AccOk#{Peer => Reply}, AccBad};
+                            false ->
+                                {AccOk, AccBad#{Peer => Reply}}
+                        end,
+                    multi_call_recv(NewReqIds, Timeout, OkPred,
+                                    NewAccOk, NewAccBad);
+                {error, {Reason, _}} ->
+                    NewAccBad = AccBad#{Peer => {down, sanitize_reason(Reason)}},
+                    multi_call_recv(NewReqIds, Timeout, OkPred, AccOk, NewAccBad)
+            end
     end.
 
 start_timeout({deadline, _} = Deadline) ->
@@ -386,48 +362,6 @@ assert_is_test() ->
 -spec assert_is_test() -> no_return().
 assert_is_test() ->
     error(not_test).
--endif.
-
-run_on_process(Fun) ->
-    run_on_process(Fun, infinity).
-
-run_on_process(Fun, Timeout) ->
-    Parent = self(),
-    Ref = make_ref(),
-    {Pid, MRef} =
-        spawn_monitor(
-          fun () ->
-                  try Fun() of
-                      Result ->
-                          Parent ! {Ref, {ok, Result}}
-                  catch
-                      T:E:Stack ->
-                          Parent ! {Ref, {raised, T, E, Stack}}
-                  end
-          end),
-
-    receive
-        {Ref, Result} ->
-            erlang:demonitor(MRef, [flush]),
-            case Result of
-                {ok, Reply} ->
-                    Reply;
-                {raised, T, E, Stack} ->
-                    erlang:raise(T, E, Stack)
-            end;
-        {'DOWN', MRef, process, Pid, Reason} ->
-            exit(Reason)
-    after
-        Timeout ->
-            erlang:demonitor(MRef, [flush]),
-            exit(Pid, shutdown),
-            exit(timeout)
-    end.
-
--ifdef(TEST).
-run_on_process_test() ->
-    ?assertExit(timeout, run_on_process(fun () -> timer:sleep(1000) end, 100)),
-    ?assertEqual(42, run_on_process(fun () -> 42 end)).
 -endif.
 
 -record(batch, { id :: any(),
