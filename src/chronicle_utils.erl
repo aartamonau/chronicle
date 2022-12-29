@@ -191,15 +191,13 @@ call(ServerRef, Call, LoggedCall, Timeout) ->
     do_call(ServerRef, Call, LoggedCall, read_timeout(Timeout)).
 
 do_call(ServerRef, Call, LoggedCall, Timeout) ->
-    try gen:call(ServerRef, '$gen_call', Call, Timeout) of
-        {ok, Reply} ->
-            Reply
+    try gen_statem:call(ServerRef, Call, Timeout)
     catch
         Class:Reason:Stack ->
             erlang:raise(
               Class,
               {sanitize_reason(Reason),
-               {gen, call, [ServerRef, LoggedCall, Timeout]}},
+               {gen_statem, call, [ServerRef, LoggedCall, Timeout]}},
               sanitize_stacktrace(Stack))
     end.
 
