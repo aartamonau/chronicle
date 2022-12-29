@@ -548,6 +548,7 @@ append(ServerRef, HistoryId, Term,
        CommittedSeqno, AtTerm, AtSeqno, Entries) ->
     call(ServerRef,
          {append, HistoryId, Term, CommittedSeqno, AtTerm, AtSeqno, Entries},
+         append,
          ?APPEND_TIMEOUT).
 
 -type install_snapshot_result() :: {ok, #metadata{}}
