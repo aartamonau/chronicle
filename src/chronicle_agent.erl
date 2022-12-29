@@ -509,9 +509,7 @@ establish_term(ServerRef, Opaque, HistoryId, Term, Position, Options) ->
                   chronicle_utils:send_options()) ->
           maybe_replies(Opaque, ensure_term_result()).
 ensure_term(ServerRef, Opaque, HistoryId, Term, Options) ->
-    chronicle_utils:call_async(ServerRef, Opaque,
-                               {ensure_term, HistoryId, Term},
-                               Options).
+    call_async(ServerRef, Opaque, {ensure_term, HistoryId, Term}, Options).
 
 -type append_result() :: ok | {error, append_error()}.
 -type append_error() ::
@@ -534,10 +532,10 @@ ensure_term(ServerRef, Opaque, HistoryId, Term, Options) ->
 append(ServerRef, Opaque, HistoryId, Term,
        CommittedSeqno,
        AtTerm, AtSeqno, Entries, Options) ->
-    chronicle_utils:call_async(ServerRef, Opaque,
-                               {append, HistoryId, Term,
-                                CommittedSeqno, AtTerm, AtSeqno, Entries},
-                               Options).
+    call_async(ServerRef, Opaque,
+               {append, HistoryId, Term,
+                CommittedSeqno, AtTerm, AtSeqno, Entries},
+               Options).
 
 -spec append(server_ref(),
              chronicle:history_id(),
@@ -756,20 +754,25 @@ call_async_reply(Pid, Opaque, Reply) ->
 callback_mode() ->
     handle_event_function.
 
-sanitize_event({call, _} = Type,
-               {append, HistoryId, Term, CommittedSeqno, AtTerm, AtSeqno, _}) ->
-    {Type, {append, HistoryId, Term, CommittedSeqno, AtTerm, AtSeqno, '...'}};
-sanitize_event({call, _} = Type,
-               {install_snapshot,
-                HistoryId, Term,
-                SnapshotSeqno, SnapshotHistoryId,
-                SnapshotTerm, SnapshotConfig, _}) ->
-    {Type, {install_snapshot,
-            HistoryId, Term,
-            SnapshotSeqno, SnapshotHistoryId,
-            SnapshotTerm, SnapshotConfig, '...'}};
+sanitize_event(info = Type, {call_async, Pid, Opaque, Call}) ->
+    {Type, {call_async, Pid, Opaque, sanitize_call(Call)}};
+sanitize_event({call, _} = Type, Call) ->
+    {Type, sanitize_call(Call)};
 sanitize_event(Type, Event) ->
     {Type, Event}.
+
+sanitize_call({append, HistoryId, Term, CommittedSeqno, AtTerm, AtSeqno, _}) ->
+    {append, HistoryId, Term, CommittedSeqno, AtTerm, AtSeqno, '...'};
+sanitize_call({install_snapshot,
+               HistoryId, Term,
+               SnapshotSeqno, SnapshotHistoryId,
+               SnapshotTerm, SnapshotConfig, _}) ->
+    {install_snapshot,
+     HistoryId, Term,
+     SnapshotSeqno, SnapshotHistoryId,
+     SnapshotTerm, SnapshotConfig, '...'};
+sanitize_call(Call) ->
+    Call.
 
 init([]) ->
     Data = init_data(),
@@ -852,12 +855,17 @@ handle_call({establish_term, HistoryId, Term}, From, State, Data) ->
     {Reply, NewData} =
         handle_establish_term(HistoryId, Term, Position, State, Data),
     {keep_state, NewData, {reply, From, Reply}};
-handle_call({ensure_term, HistoryId, Term}, From, State, Data) ->
-    handle_ensure_term(HistoryId, Term, From, State, Data);
 handle_call({append, HistoryId, Term, CommittedSeqno, AtTerm, AtSeqno, Entries},
             From, State, Data) ->
-    handle_append(HistoryId, Term, CommittedSeqno,
-                  AtTerm, AtSeqno, Entries, From, State, Data);
+    case handle_append(HistoryId, Term, CommittedSeqno,
+                       AtTerm, AtSeqno, Entries,
+                       {call, From},
+                       State, Data) of
+        {ok, NewState, NewData} ->
+            {next_state, NewState, NewData};
+        {error, Error} ->
+            {keep_state_and_data, {reply, From, Error}}
+    end;
 handle_call({local_mark_committed, HistoryId, Term, CommittedSeqno},
             From, State, Data) ->
     handle_local_mark_committed(HistoryId, Term,
@@ -889,6 +897,23 @@ handle_call_async({establish_term, HistoryId, Term, Position},
         handle_establish_term(HistoryId, Term, Position, State, Data),
     call_async_reply(Pid, Opaque, Reply),
     {keep_state, NewData};
+handle_call_async({ensure_term, HistoryId, Term}, Pid, Opaque, State, Data) ->
+    Reply = handle_ensure_term(HistoryId, Term, State, Data),
+    call_async_reply(Pid, Opaque, Reply),
+    keep_state_and_data;
+handle_call_async({append, HistoryId, Term,
+                   CommittedSeqno, AtTerm, AtSeqno, Entries},
+                  Pid, Opaque, State, Data) ->
+    case handle_append(HistoryId, Term, CommittedSeqno,
+                       AtTerm, AtSeqno, Entries,
+                       {call_async, {Pid, Opaque}},
+                       State, Data) of
+        {ok, NewState, NewData} ->
+            {next_state, NewState, NewData};
+        {error, Error} ->
+            call_async_reply(Pid, Opaque, Error),
+            keep_state_and_data
+    end;
 handle_call_async(_Call, Pid, Opaque, _State, _Data) ->
     call_async_reply(Pid, Opaque, nack),
     keep_state_and_data.
@@ -1132,8 +1157,14 @@ handle_completed_appends(Froms, Count, State, OldData, NewData) ->
     NewData0 = dec_pending_appends(Count, NewData),
     NewData1 = post_append(State, OldData, NewData0),
     lists:foreach(
-      fun (From) ->
-              gen_statem:reply(From, ok)
+      fun ({Type, From}) ->
+              case Type of
+                  call_async ->
+                      {Pid, Opaque} = From,
+                      call_async_reply(Pid, Opaque, ok);
+                  call ->
+                      gen_statem:reply(From, ok)
+              end
       end, Froms),
 
     NewData1.
@@ -1617,18 +1648,15 @@ config_position(_) ->
 entry_position(#log_entry{term = Term, seqno = Seqno}) ->
     {Term, Seqno}.
 
-handle_ensure_term(HistoryId, Term, From, State, Data) ->
-    Reply =
-        case ?CHECK(check_prepared(State),
-                    check_history_id(HistoryId, Data),
-                    check_not_earlier_term(Term, Data)) of
-            ok ->
-                {ok, build_metadata(Data)};
-            {error, _} = Error ->
-                Error
-        end,
-
-    {keep_state_and_data, {reply, From, Reply}}.
+handle_ensure_term(HistoryId, Term, State, Data) ->
+    case ?CHECK(check_prepared(State),
+                check_history_id(HistoryId, Data),
+                check_not_earlier_term(Term, Data)) of
+        ok ->
+            {ok, build_metadata(Data)};
+        {error, _} = Error ->
+            Error
+    end.
 
 handle_append(HistoryId, Term,
               CommittedSeqno, AtTerm, AtSeqno, Entries, From, State, Data) ->
@@ -1640,7 +1668,7 @@ handle_append(HistoryId, Term,
         {ok, Info} ->
             complete_append(HistoryId, Term, Info, From, State, Data);
         {error, _} = Error ->
-            {keep_state_and_data, {reply, From, Error}}
+            {error, Error}
     end.
 
 complete_append(HistoryId, Term, Info, From, State, Data) ->
@@ -1681,7 +1709,7 @@ complete_append(HistoryId, Term, Info, From, State, Data) ->
     %% state machines get deleted.
 
     {NewState, NewData} = check_state_transitions(State, Data, NewData1),
-    {next_state, NewState, NewData}.
+    {ok, NewState, NewData}.
 
 post_append(State, OldData, NewData) ->
     publish_state(State, NewData),
