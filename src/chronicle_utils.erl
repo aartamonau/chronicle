@@ -27,7 +27,8 @@
          terminate_and_wait/2, terminate_linked_process/2,
          next_term/2,
          call_async/4, send/3,
-         call/2, call/3, call/4, multi_call/4, multi_call/5,
+         call/2, call/3, call/4,
+         send_requests/3, multi_call/4, multi_call/5,
          start_timeout/1, read_timeout/1, read_deadline/1,
          term_number/1, term_leader/1,
          get_position/1, compare_positions/2, max_position/2,
@@ -209,6 +210,17 @@ do_call(ServerRef, Call, LoggedCall, Timeout) ->
               sanitize_stacktrace(Stack))
     end.
 
+-spec send_requests([chronicle:peer()],
+                    Name::atom(),
+                    Request::term()) ->
+          gen_statem:request_id_collection().
+send_requests(Peers, Name, Request) ->
+    lists:foldl(
+      fun (Peer, ReqIds) ->
+              ServerRef = ?SERVER_NAME(Peer, Name),
+              gen_statem:send_request(ServerRef, Request, Peer, ReqIds)
+      end, gen_statem:reqids_new(), Peers).
+
 -type multi_call_error() :: {down, Reason::any()} | timeout.
 -type multi_call_result() :: multi_call_result(any(), any()).
 -type multi_call_result(Ok, Bad) ::
@@ -234,15 +246,8 @@ multi_call(Peers, Name, Request, Timeout) ->
           multi_call_result().
 multi_call(Peers, Name, Request, OkPred, Timeout) ->
     Deadline = erlang:monotonic_time(millisecond) + Timeout,
-    ReqIds = multi_call_send(Peers, Name, Request),
+    ReqIds = send_requests(Peers, Name, Request),
     multi_call_recv(ReqIds, {abs, Deadline}, OkPred, #{}, #{}).
-
-multi_call_send(Peers, Name, Request) ->
-    lists:foldl(
-      fun (Peer, ReqIds) ->
-              ServerRef = ?SERVER_NAME(Peer, Name),
-              gen_statem:send_request(ServerRef, Request, Peer, ReqIds)
-      end, gen_statem:reqids_new(), Peers).
 
 multi_call_recv(ReqIds, Timeout, OkPred, AccOk, AccBad) ->
     case gen_statem:receive_response(ReqIds, Timeout, true) of
