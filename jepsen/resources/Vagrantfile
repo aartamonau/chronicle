@@ -8,7 +8,7 @@ else
 end
 
 Vagrant.configure("2") do |config|
-  config.vm.box = "generic/ubuntu2004"
+  config.vm.box = "debian/testing64"
   config.vm.network "private_network", type: "dhcp"
   config.ssh.insert_key = false
 
@@ -27,6 +27,6 @@ Vagrant.configure("2") do |config|
     config.vm.define "node#{i}"
   end
 
-  config.vm.provision "shell", path: "./vm-setup-ubuntu2004.sh"
+  config.vm.provision "shell", path: "./vm-setup.sh"
 
 end
