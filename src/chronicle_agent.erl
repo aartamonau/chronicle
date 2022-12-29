@@ -49,13 +49,13 @@
               force_snapshot_result/0, export_snapshot_result/0]).
 
 -import(chronicle_utils, [call/2, call/3, call/4,
-                          call_async/4,
                           next_term/2,
                           term_number/1,
                           compare_positions/2,
                           max_position/2,
                           sanitize_entry/1,
-                          sanitize_entries/1]).
+                          sanitize_entries/1,
+                          send/3]).
 
 -define(NAME, ?MODULE).
 -define(SERVER, ?SERVER_NAME(?NAME)).
@@ -321,8 +321,7 @@ with_latest_snapshot(Fun) ->
     end.
 
 release_snapshot(Seqno) ->
-    chronicle_utils:send(?SERVER,
-                         {snapshot_mgr, {release_snapshot, Seqno}}, []).
+    send(?SERVER, {snapshot_mgr, {release_snapshot, Seqno}}, []).
 
 snapshot_ok(Seqno) ->
     snapshot_result(Seqno, ok).
@@ -331,8 +330,7 @@ snapshot_failed(Seqno) ->
     snapshot_result(Seqno, failed).
 
 snapshot_result(Seqno, Result) ->
-    chronicle_utils:send(?SERVER,
-                         {snapshot_mgr, {snapshot_result, Seqno, Result}}, []).
+    send(?SERVER, {snapshot_mgr, {snapshot_result, Seqno, Result}}, []).
 
 %% For debugging only.
 get_log() ->
@@ -511,9 +509,9 @@ establish_term(ServerRef, Opaque, HistoryId, Term, Position, Options) ->
                   chronicle_utils:send_options()) ->
           maybe_replies(Opaque, ensure_term_result()).
 ensure_term(ServerRef, Opaque, HistoryId, Term, Options) ->
-    call_async(ServerRef, Opaque,
-               {ensure_term, HistoryId, Term},
-               Options).
+    chronicle_utils:call_async(ServerRef, Opaque,
+                               {ensure_term, HistoryId, Term},
+                               Options).
 
 -type append_result() :: ok | {error, append_error()}.
 -type append_error() ::
@@ -536,10 +534,10 @@ ensure_term(ServerRef, Opaque, HistoryId, Term, Options) ->
 append(ServerRef, Opaque, HistoryId, Term,
        CommittedSeqno,
        AtTerm, AtSeqno, Entries, Options) ->
-    call_async(ServerRef, Opaque,
-               {append, HistoryId, Term,
-                CommittedSeqno, AtTerm, AtSeqno, Entries},
-               Options).
+    chronicle_utils:call_async(ServerRef, Opaque,
+                               {append, HistoryId, Term,
+                                CommittedSeqno, AtTerm, AtSeqno, Entries},
+                               Options).
 
 -spec append(server_ref(),
              chronicle:history_id(),
@@ -746,6 +744,14 @@ export_snapshot(Path) ->
             {error, {mkdir_failed, Error, Path}}
     end.
 
+%% helpers
+call_async(ServerRef, Opaque, Call, Options) ->
+    send(ServerRef, {call_async, self(), Opaque, Call}, Options).
+
+call_async_reply(Pid, Opaque, Reply) ->
+    Pid ! {Opaque, Reply},
+    ok.
+
 %% gen_statem callbacks
 callback_mode() ->
     handle_event_function.
@@ -799,6 +805,8 @@ handle_event({call, From}, Call, State, Data) ->
     handle_call(Call, From, State, Data);
 handle_event(cast, prepare_wipe_done, State, Data) ->
     handle_prepare_wipe_done(State, Data);
+handle_event(info, {call_async, Pid, Opaque, Call}, State, Data) ->
+    handle_call_async(Call, Pid, Opaque, State, Data);
 handle_event(info, {chronicle_storage, Event}, State, Data) ->
     handle_storage_event(Event, State, Data);
 handle_event(info, snapshot_timeout, State, Data) ->
@@ -841,9 +849,9 @@ handle_call({join_cluster, ClusterInfo}, From, State, Data) ->
 handle_call({establish_term, HistoryId, Term}, From, State, Data) ->
     %% TODO: consider simply skipping the position check for this case
     Position = get_position(Data),
-    handle_establish_term(HistoryId, Term, Position, From, State, Data);
-handle_call({establish_term, HistoryId, Term, Position}, From, State, Data) ->
-    handle_establish_term(HistoryId, Term, Position, From, State, Data);
+    {Reply, NewData} =
+        handle_establish_term(HistoryId, Term, Position, State, Data),
+    {keep_state, NewData, {reply, From, Reply}};
 handle_call({ensure_term, HistoryId, Term}, From, State, Data) ->
     handle_ensure_term(HistoryId, Term, From, State, Data);
 handle_call({append, HistoryId, Term, CommittedSeqno, AtTerm, AtSeqno, Entries},
@@ -874,6 +882,16 @@ handle_call(force_snapshot, From, State, Data) ->
 handle_call(_Call, From, _State, _Data) ->
     {keep_state_and_data,
      {reply, From, nack}}.
+
+handle_call_async({establish_term, HistoryId, Term, Position},
+                  Pid, Opaque, State, Data) ->
+    {Reply, NewData} =
+        handle_establish_term(HistoryId, Term, Position, State, Data),
+    call_async_reply(Pid, Opaque, Reply),
+    {keep_state, NewData};
+handle_call_async(_Call, Pid, Opaque, _State, _Data) ->
+    call_async_reply(Pid, Opaque, nack),
+    keep_state_and_data.
 
 terminate(_Reason, State, Data) ->
     maybe_cancel_snapshot(State, Data).
@@ -1516,7 +1534,7 @@ check_join_cluster_done(State, Data) ->
             {State, Data}
     end.
 
-handle_establish_term(HistoryId, Term, Position, From, State, Data) ->
+handle_establish_term(HistoryId, Term, Position, State, Data) ->
     assert_valid_history_id(HistoryId),
     assert_valid_term(Term),
 
@@ -1529,9 +1547,9 @@ handle_establish_term(HistoryId, Term, Position, From, State, Data) ->
             ?DEBUG("Accepted term ~p in history ~p", [Term, HistoryId]),
 
             Reply = {ok, build_metadata(Data)},
-            {keep_state, NewData, {reply, From, Reply}};
+            {Reply, NewData};
         {error, _} = Error ->
-            {keep_state_and_data, {reply, From, Error}}
+            {Error, Data}
     end.
 
 check_establish_term(HistoryId, Term, Position, State, Data) ->
