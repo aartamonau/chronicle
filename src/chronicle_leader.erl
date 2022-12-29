@@ -135,21 +135,11 @@ announce_leader_status() ->
 request_vote(Peers, Candidate, HistoryId, Position) ->
     chronicle_utils:send_requests(Peers, ?MODULE,
                                   {request_vote, Candidate, HistoryId, Position}).
-call_async(Peer, Call) ->
-    ServerRef = ?SERVER(Peer),
-    MRef = chronicle_utils:monitor_process(ServerRef),
-    chronicle_utils:call_async(ServerRef, MRef, Call, [noconnect]),
-    MRef.
-
-call_async_many(Peers, Call) ->
-    lists:foldl(
-      fun (Peer, Acc) ->
-              Ref = call_async(Peer, Call),
-              Acc#{Ref => Peer}
-      end, #{}, Peers).
 
 check_member(Peers, HistoryId, Peer, PeerId, PeerSeqno) ->
-    call_async_many(Peers, {check_member, HistoryId, Peer, PeerId, PeerSeqno}).
+    chronicle_utils:send_requests(Peers, ?MODULE,
+                                  {check_member, HistoryId,
+                                   Peer, PeerId, PeerSeqno}).
 
 note_term_finished(HistoryId, Term) ->
     gen_statem:cast(?SERVER, {note_term_status, HistoryId, Term, finished}).
@@ -785,8 +775,8 @@ do_check_member_worker(Metadata) ->
             ok;
         _ ->
             CheckPeers = lists:sublist(chronicle_utils:shuffle(OtherPeers), 5),
-            Refs = check_member(CheckPeers, HistoryId, Self, SelfId, HighSeqno),
-            case check_member_worker_loop(Refs) of
+            ReqIds = check_member(CheckPeers, HistoryId, Self, SelfId, HighSeqno),
+            case check_member_worker_loop(ReqIds) of
                 ok ->
                     ok;
                 {removed, Peer} ->
@@ -794,32 +784,31 @@ do_check_member_worker(Metadata) ->
             end
     end.
 
-check_member_worker_loop(Refs)
-  when map_size(Refs) =:= 0 ->
-    ok;
-check_member_worker_loop(Refs) ->
-    {Ref, Result} =
-        receive
-            {RespRef, _} = Resp when is_reference(RespRef) ->
-                Resp;
-            {'DOWN', DownRef, process, _Pid, Reason} ->
-                {DownRef, {error, {down, Reason}}}
-        end,
+check_member_worker_loop(ReqIds) ->
+    case gen_statem:receive_response(ReqIds, infinity, true) of
+        no_request ->
+            ok;
+        {Response, Peer, NewReqIds} ->
+            Result =
+                case Response of
+                    {reply, Reply} ->
+                        Reply;
+                    {error, {Reason, _}} ->
+                        {error, {down, chronicle_utils:sanitize_reason(Reason)}}
+                end,
 
-    case maps:take(Ref, Refs) of
-        {Peer, NewRefs} ->
             case Result of
                 {ok, true} ->
-                    check_member_worker_loop(NewRefs);
+                    check_member_worker_loop(NewReqIds);
                 {ok, false} ->
+                    %% other responses will not get cleaned up, but as we are
+                    %% running in a subprocess, that does not matter
                     {removed, Peer};
-                {error, Error} ->
+                Error ->
                     ?DEBUG("Failed to check membership status on peer ~p: ~p",
                            [Peer, Error]),
-                    check_member_worker_loop(NewRefs)
-            end;
-        error ->
-            check_member_worker_loop(Refs)
+                    check_member_worker_loop(NewReqIds)
+            end
     end.
 
 handle_check_member(HistoryId, Peer, PeerId, PeerSeqno, From, _State, _Data) ->
