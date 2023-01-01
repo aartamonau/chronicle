@@ -20,7 +20,7 @@
 -include("chronicle.hrl").
 
 -export([start_link/0]).
--export([server_ref/2, monitor/1,
+-export([server_ref/2,
          get_system_state/0, get_metadata/0,
          get_peer_info/0, get_peer_infos/1,
          check_grant_vote/2,
@@ -33,8 +33,8 @@
          provision/1, reprovision/0,
          wipe/0, is_wipe_requested/0,
          prepare_join/1, join_cluster/1,
-         establish_local_term/2, establish_term/6, ensure_term/5,
-         append/7, append/9,
+         establish_local_term/2, establish_term/7, ensure_term/6,
+         append/7, append/10,
          install_snapshot/8,
          local_mark_committed/3,
          local_store_branch/2, store_branch/3, undo_branch/3,
@@ -139,10 +139,6 @@ server_ref(Peer, SelfPeer) ->
         false ->
             ?SERVER_NAME(Peer, ?NAME)
     end.
-
--spec monitor(server_ref()) -> reference().
-monitor(ServerRef) ->
-    chronicle_utils:monitor_process(ServerRef).
 
 -spec get_system_state() ->
           not_provisioned |
@@ -482,14 +478,15 @@ establish_local_term(HistoryId, Term) ->
          ?ESTABLISH_LOCAL_TERM_TIMEOUT).
 
 -spec establish_term(server_ref(),
+                     reference(),
                      Opaque,
                      chronicle:history_id(),
                      chronicle:leader_term(),
                      chronicle:peer_position(),
                      chronicle_utils:send_options()) ->
           maybe_replies(Opaque, establish_term_result()).
-establish_term(ServerRef, Opaque, HistoryId, Term, Position, Options) ->
-    call_async(ServerRef, Opaque,
+establish_term(ServerRef, Alias, Opaque, HistoryId, Term, Position, Options) ->
+    call_async(ServerRef, Alias, Opaque,
                {establish_term, HistoryId, Term, Position},
                Options).
 
@@ -503,13 +500,14 @@ establish_term(ServerRef, Opaque, HistoryId, Term, Position, Options) ->
         {conflicting_term, chronicle:leader_term()}.
 
 -spec ensure_term(server_ref(),
+                  reference(),
                   Opaque,
                   chronicle:history_id(),
                   chronicle:leader_term(),
                   chronicle_utils:send_options()) ->
           maybe_replies(Opaque, ensure_term_result()).
-ensure_term(ServerRef, Opaque, HistoryId, Term, Options) ->
-    call_async(ServerRef, Opaque, {ensure_term, HistoryId, Term}, Options).
+ensure_term(ServerRef, Alias, Opaque, HistoryId, Term, Options) ->
+    call_async(ServerRef, Alias, Opaque, {ensure_term, HistoryId, Term}, Options).
 
 -type append_result() :: ok | {error, append_error()}.
 -type append_error() ::
@@ -520,6 +518,7 @@ ensure_term(ServerRef, Opaque, HistoryId, Term, Options) ->
         {protocol_error, any()}.
 
 -spec append(server_ref(),
+             reference(),
              Opaque,
              chronicle:history_id(),
              chronicle:leader_term(),
@@ -529,10 +528,10 @@ ensure_term(ServerRef, Opaque, HistoryId, Term, Options) ->
              [#log_entry{}],
              chronicle_utils:send_options()) ->
           maybe_replies(Opaque, append_result()).
-append(ServerRef, Opaque, HistoryId, Term,
+append(ServerRef, Alias, Opaque, HistoryId, Term,
        CommittedSeqno,
        AtTerm, AtSeqno, Entries, Options) ->
-    call_async(ServerRef, Opaque,
+    call_async(ServerRef, Alias, Opaque,
                {append, HistoryId, Term,
                 CommittedSeqno, AtTerm, AtSeqno, Entries},
                Options).
@@ -744,19 +743,19 @@ export_snapshot(Path) ->
     end.
 
 %% helpers
-call_async(ServerRef, Opaque, Call, Options) ->
-    send(ServerRef, {call_async, self(), Opaque, Call}, Options).
+call_async(ServerRef, Alias, Opaque, Call, Options) ->
+    send(ServerRef, {call_async, Alias, Opaque, Call}, Options).
 
-call_async_reply(Pid, Opaque, Reply) ->
-    Pid ! {Opaque, Reply},
+call_async_reply(Alias, Opaque, Reply) ->
+    Alias ! {Opaque, Reply},
     ok.
 
 %% gen_statem callbacks
 callback_mode() ->
     handle_event_function.
 
-sanitize_event(info = Type, {call_async, Pid, Opaque, Call}) ->
-    {Type, {call_async, Pid, Opaque, sanitize_call(Call)}};
+sanitize_event(info = Type, {call_async, Alias, Opaque, Call}) ->
+    {Type, {call_async, Alias, Opaque, sanitize_call(Call)}};
 sanitize_event({call, _} = Type, Call) ->
     {Type, sanitize_call(Call)};
 sanitize_event(Type, Event) ->
@@ -809,8 +808,8 @@ handle_event({call, From}, Call, State, Data) ->
     handle_call(Call, From, State, Data);
 handle_event(cast, prepare_wipe_done, State, Data) ->
     handle_prepare_wipe_done(State, Data);
-handle_event(info, {call_async, Pid, Opaque, Call}, State, Data) ->
-    handle_call_async(Call, Pid, Opaque, State, Data);
+handle_event(info, {call_async, Alias, Opaque, Call}, State, Data) ->
+    handle_call_async(Call, Alias, Opaque, State, Data);
 handle_event(info, {chronicle_storage, Event}, State, Data) ->
     handle_storage_event(Event, State, Data);
 handle_event(info, snapshot_timeout, State, Data) ->
@@ -893,26 +892,26 @@ handle_call(_Call, From, _State, _Data) ->
      {reply, From, nack}}.
 
 handle_call_async({establish_term, HistoryId, Term, Position},
-                  Pid, Opaque, State, Data) ->
+                  Alias, Opaque, State, Data) ->
     {Reply, NewData} =
         handle_establish_term(HistoryId, Term, Position, State, Data),
-    call_async_reply(Pid, Opaque, Reply),
+    call_async_reply(Alias, Opaque, Reply),
     {keep_state, NewData};
-handle_call_async({ensure_term, HistoryId, Term}, Pid, Opaque, State, Data) ->
+handle_call_async({ensure_term, HistoryId, Term}, Alias, Opaque, State, Data) ->
     Reply = handle_ensure_term(HistoryId, Term, State, Data),
-    call_async_reply(Pid, Opaque, Reply),
+    call_async_reply(Alias, Opaque, Reply),
     keep_state_and_data;
 handle_call_async({append, HistoryId, Term,
                    CommittedSeqno, AtTerm, AtSeqno, Entries},
-                  Pid, Opaque, State, Data) ->
+                  Alias, Opaque, State, Data) ->
     case handle_append(HistoryId, Term, CommittedSeqno,
                        AtTerm, AtSeqno, Entries,
-                       {call_async, {Pid, Opaque}},
+                       {call_async, {Alias, Opaque}},
                        State, Data) of
         {ok, NewState, NewData} ->
             {next_state, NewState, NewData};
         {error, Error} ->
-            call_async_reply(Pid, Opaque, Error),
+            call_async_reply(Alias, Opaque, Error),
             keep_state_and_data
     end;
 handle_call_async(_Call, Pid, Opaque, _State, _Data) ->
@@ -1161,8 +1160,8 @@ handle_completed_appends(Froms, Count, State, OldData, NewData) ->
       fun ({Type, From}) ->
               case Type of
                   call_async ->
-                      {Pid, Opaque} = From,
-                      call_async_reply(Pid, Opaque, ok);
+                      {Alias, Opaque} = From,
+                      call_async_reply(Alias, Opaque, ok);
                   call ->
                       gen_statem:reply(From, ok)
               end

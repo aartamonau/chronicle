@@ -205,25 +205,13 @@ handle_event(info, check_peers, State, Data) ->
     {keep_state, check_peers(Data)};
 handle_event(info, {check_quorum, CommittedSeqno, SyncRound}, State, Data) ->
     handle_check_quorum(CommittedSeqno, SyncRound, State, Data);
-handle_event(info, {{agent_response, Ref, Peer, Request}, Result}, State,
+handle_event(info, {{agent_response, Peer, Request}, Result}, State,
              #data{peers = Peers} = Data) ->
-    case lists:member(Peer, Peers) of
-        true ->
-            case get_peer_monitor(Peer, Data) of
-                {ok, OurRef} when OurRef =:= Ref ->
-                    handle_agent_response(Peer, Request, Result, State, Data);
-                _ ->
-                    ?DEBUG("Ignoring a stale response "
-                           "from peer ~w. Request: ~w",
-                           [Peer, Request]),
-                    keep_state_and_data
-            end;
-        false ->
-            ?INFO("Ignoring a response from a removed peer ~w. Request: ~w~n"
-                  "Peers: ~w",
-                  [Peer, Request, Peers]),
-            keep_state_and_data
-    end;
+    %% Each peer sends its responses through unique aliases that get cleaned
+    %% up when peers are removed. So we must never get a message from a
+    %% removed peer.
+    true = lists:member(Peer, Peers),
+    handle_agent_response(Peer, Request, Result, State, Data);
 handle_event(info, {nodeup, Peer, Info}, State, Data) ->
     handle_nodeup(Peer, Info, State, Data);
 handle_event(info, {nodedown, Peer, Info}, State, Data) ->
@@ -1570,8 +1558,8 @@ maybe_send_requests_connected(Peers, Data, Fun) ->
               end
       end, Peers).
 
-make_agent_opaque(Ref, Peer, Request) ->
-    {agent_response, Ref, Peer, Request}.
+make_agent_opaque(Peer, Request) ->
+    {agent_response, Peer, Request}.
 
 send_requests(Peers, Data, Fun) ->
     {NewData, []} =
@@ -1589,8 +1577,8 @@ send_local_establish_term(Metadata, #data{peer = Self} = Data) ->
 
     send_requests(
       Peers, Data,
-      fun (Peer, PeerRef, _ServerRef) ->
-              Opaque = make_agent_opaque(PeerRef, Peer, establish_term),
+      fun (Peer, _PeerRef, _ServerRef) ->
+              Opaque = make_agent_opaque(Peer, establish_term),
               self() ! {Opaque, {ok, Metadata}}
       end).
 
@@ -1604,8 +1592,8 @@ send_establish_term(Peers, Position,
                      "Log position: ~w.",
                      [Peer, Term, HistoryId, Position]),
 
-              Opaque = make_agent_opaque(PeerRef, Peer, establish_term),
-              case chronicle_agent:establish_term(ServerRef, Opaque,
+              Opaque = make_agent_opaque(Peer, establish_term),
+              case chronicle_agent:establish_term(ServerRef, PeerRef, Opaque,
                                                   HistoryId, Term, Position,
                                                   [nosuspend]) of
                   ok ->
@@ -1685,8 +1673,8 @@ send_append_to_peer(Peer, PeerCredit, PeerRef, PeerSeqno,
     case get_entries(PeerSeqno, PeerCredit, Data) of
         {ok, AtTerm, CommittedSeqno, HighSeqno, Entries} ->
             Request = {append, CommittedSeqno, HighSeqno},
-            Opaque = make_agent_opaque(PeerRef, Peer, Request),
-            case chronicle_agent:append(ServerRef, Opaque, HistoryId,
+            Opaque = make_agent_opaque(Peer, Request),
+            case chronicle_agent:append(ServerRef, PeerRef, Opaque, HistoryId,
                                         Term, CommittedSeqno,
                                         AtTerm, PeerSeqno, Entries,
                                         [noconnect, nosuspend]) of
@@ -1714,14 +1702,16 @@ catchup_peers(Peers, #data{catchup_pid = Pid} = Data) ->
               set_peer_catchup(Peer, NewData),
 
               {ok, Ref} = get_peer_monitor(Peer, NewData),
-              Opaque = make_agent_opaque(Ref, Peer, catchup),
+              Opaque = make_agent_opaque(Peer, catchup),
 
               ?DEBUG("Catching up peer ~w from seqno ~b", [Peer, PeerSeqno]),
-              chronicle_catchup:catchup_peer(Pid, Opaque, Peer, PeerSeqno)
+              chronicle_catchup:catchup_peer(Pid, Ref, Opaque, Peer, PeerSeqno)
       end, Peers),
 
     NewData.
 
+%% Attempt to cancel a catchup requests. Cancellation happens asynchronously
+%% and may send a response anyway.
 maybe_cancel_peer_catchup(Peer, #data{catchup_pid = Pid} = Data) ->
     case get_peer_status(Peer, Data) of
         {ok, #peer_status{state = catchup}} ->
@@ -1856,9 +1846,9 @@ send_ensure_term(Peers, Request,
     maybe_send_requests(
       Peers, Data,
       fun (Peer, PeerRef, ServerRef) ->
-              Opaque = make_agent_opaque(PeerRef, Peer, Request),
+              Opaque = make_agent_opaque(Peer, Request),
               case chronicle_agent:ensure_term(ServerRef,
-                                               Opaque, HistoryId, Term,
+                                               PeerRef, Opaque, HistoryId, Term,
                                                [nosuspend]) of
                   ok ->
                       true;
@@ -1925,7 +1915,7 @@ monitor_agents(Peers,
                           Acc;
                       false ->
                           ServerRef = chronicle_agent:server_ref(Peer, Self),
-                          MRef = chronicle_agent:monitor(ServerRef),
+                          MRef = chronicle_utils:monitor_process(ServerRef, [{alias, demonitor}]),
                           {AccMPeers#{Peer => MRef}, AccMRefs#{MRef => Peer}}
                   end
           end, {MPeers, MRefs}, Peers),

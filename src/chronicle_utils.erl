@@ -32,7 +32,7 @@
          start_timeout/1, read_timeout/1, read_deadline/1,
          term_number/1, term_leader/1,
          get_position/1, compare_positions/2, max_position/2,
-         monitor_process/1,
+         monitor_process/1, monitor_process/2,
          make_batch/2, batch_enq/2, batch_flush/1, batch_map/2,
          gb_trees_filter/2,
          random_uuid/0,
@@ -333,7 +333,10 @@ max_position(PositionA, PositionB) ->
 
 %% A version of erlang:monitor(process, ...) that knows how to deal with {via,
 %% Registry, Name} processes that are used by vnet.
-monitor_process({via, Registry, Name}) ->
+monitor_process(What) ->
+    monitor_process(What, []).
+
+monitor_process({via, Registry, Name}, Options) ->
     assert_is_test(),
 
     case Registry:whereis_name(Name) of
@@ -346,10 +349,10 @@ monitor_process({via, Registry, Name}) ->
             self() ! {'DOWN', MRef, process, undefined, noproc},
             MRef;
         Pid when is_pid(Pid) ->
-            monitor_process(Pid)
+            monitor_process(Pid, Options)
     end;
-monitor_process(Process) ->
-    erlang:monitor(process, Process).
+monitor_process(Process, Options) ->
+    erlang:monitor(process, Process, Options).
 
 -ifdef(TEST).
 assert_is_test() ->
