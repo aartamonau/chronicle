@@ -25,7 +25,7 @@
 -export([force_snapshot/0, export_snapshot/1]).
 -export([check_quorum/0, check_quorum/1]).
 -export([get_peer_statuses/0, get_cluster_status/0]).
--export([provision/1, reprovision/0, wipe/0]).
+-export([provision/1, wipe/0]).
 -export([get_cluster_info/0, get_cluster_info/1]).
 -export([prepare_join/1, join_cluster/1]).
 -export([failover/1, failover/2, try_cancel_failover/2]).
@@ -131,10 +131,6 @@ get_cluster_status() ->
       Machine :: {Name :: atom(), Mod :: module(), Args :: [any()]}.
 provision(Machines) ->
     chronicle_agent:provision(Machines).
-
--spec reprovision() -> chronicle_agent:reprovision_result().
-reprovision() ->
-    chronicle_agent:reprovision().
 
 -spec wipe() -> chronicle_agent:wipe_result().
 wipe() ->

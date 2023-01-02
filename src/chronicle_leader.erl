@@ -401,8 +401,6 @@ is_interesting_event({system_state, provisioned, _}) ->
     true;
 is_interesting_event({system_state, removed, _}) ->
     true;
-is_interesting_event({system_event, reprovisioned, _}) ->
-    true;
 is_interesting_event({new_history, _, _}) ->
     true;
 is_interesting_event({term_established, _}) ->
@@ -453,8 +451,6 @@ handle_chronicle_event({system_state, provisioned, Metadata}, State, Data) ->
     handle_provisioned(Metadata, State, Data);
 handle_chronicle_event({system_state, removed, Metadata}, State, Data) ->
     handle_removed(Metadata, State, Data);
-handle_chronicle_event({system_event, reprovisioned, Metadata}, State, Data) ->
-    handle_reprovisioned(Metadata, State, Data);
 handle_chronicle_event({new_config, Config, Metadata}, State, Data) ->
     handle_new_config(Config, Metadata, State, Data);
 handle_chronicle_event({new_history, HistoryId, Metadata}, State, Data) ->
@@ -484,18 +480,6 @@ handle_removed(Metadata, State, Data) ->
         _ ->
             {next_state, make_observer(NewData), NewData}
     end.
-
-handle_reprovisioned(Metadata, _State, Data) ->
-    ?INFO("System reprovisioned."),
-    NewData = metadata2data(Metadata, Data),
-
-    %% This ultimately terminates the current term and starts a new one. We're
-    %% transitioning straight to the candidate state to avoid extra election
-    %% timeout that would have to expire if we moved to the observer state as
-    %% is down elsewhere. Moving straight to the candidate state should be
-    %% fine since reprovisioning can happen only when we are the only node in
-    %% the cluster.
-    {next_state, #candidate{}, NewData}.
 
 handle_new_config(_Config, Metadata, State, Data) ->
     NewData = metadata2data(Metadata, Data),

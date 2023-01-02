@@ -30,7 +30,7 @@
          get_log/0, get_log/4,
          get_log_committed/1, get_log_committed/2, get_log_for_rsm/3,
          get_term_for_seqno/1, get_history_id/1,
-         provision/1, reprovision/0,
+         provision/1,
          wipe/0, is_wipe_requested/0,
          prepare_join/1, join_cluster/1,
          establish_local_term/2, establish_term/7, ensure_term/6,
@@ -44,7 +44,7 @@
 -export([callback_mode/0, sanitize_event/2,
          init/1, handle_event/4, terminate/3]).
 
--export_type([provision_result/0, reprovision_result/0, wipe_result/0,
+-export_type([provision_result/0, wipe_result/0,
               prepare_join_result/0, join_cluster_result/0,
               force_snapshot_result/0, export_snapshot_result/0]).
 
@@ -408,25 +408,6 @@ provision(Machines) ->
             Other
     end.
 
--type reprovision_result() :: ok
-                            | {error, reprovision_error()}.
--type reprovision_error() :: {bad_state,
-                              not_provisioned | joining_cluster | removed}
-                           | {bad_config, chronicle:peer(), #config{}}.
-
--spec reprovision() -> reprovision_result().
-reprovision() ->
-    case call(?SERVER, reprovision, ?PROVISION_TIMEOUT) of
-        ok ->
-            sync_system_state_change(),
-
-            %% Make sure that chronicle_leader updates published leader
-            %% information, so writes don't fail once reprovision() returns.
-            sync_leader();
-        Other ->
-            Other
-    end.
-
 -type wipe_result() :: ok.
 -spec wipe() -> wipe_result().
 wipe() ->
@@ -640,9 +621,6 @@ undo_branch(Peers, BranchId, Timeout) ->
 sync_system_state_change() ->
     ok = chronicle_secondary_sup:sync().
 
-sync_leader() ->
-    ok = chronicle_leader:sync().
-
 is_wipe_requested() ->
     call(?SERVER, is_wipe_requested).
 
@@ -839,8 +817,6 @@ handle_call({get_log, HistoryId, Term, StartSeqno, EndSeqno},
     handle_get_log(HistoryId, Term, StartSeqno, EndSeqno, From, State, Data);
 handle_call({provision, Machines}, From, State, Data) ->
     handle_provision(Machines, From, State, Data);
-handle_call(reprovision, From, State, Data) ->
-    handle_reprovision(From, State, Data);
 handle_call(wipe, From, State, Data) ->
     handle_wipe(From, State, Data);
 handle_call(is_wipe_requested, From, State, Data) ->
@@ -1168,65 +1144,6 @@ handle_completed_appends(Froms, Count, State, OldData, NewData) ->
       end, Froms),
 
     NewData1.
-
-handle_reprovision(From, State, Data) ->
-    case check_reprovision(State, Data) of
-        {ok, OldPeer, Config} ->
-            #{?META_HISTORY_ID := HistoryId,
-              ?META_TERM := Term} = get_pending_meta(Data),
-
-            HighSeqno = get_pending_high_seqno(Data),
-            Peer = get_peer_name(),
-            NewTerm = next_term(Term, Peer),
-            NewConfig = chronicle_config:reinit(Peer, OldPeer, Config),
-            Seqno = HighSeqno + 1,
-
-            ConfigEntry = #log_entry{history_id = HistoryId,
-                                     term = NewTerm,
-                                     seqno = Seqno,
-                                     value = NewConfig},
-
-            ?DEBUG("Reprovisioning peer with config:~n~p", [ConfigEntry]),
-
-            NewData = append_entry(ConfigEntry,
-                                   #{?META_PEER => Peer,
-                                     ?META_TERM => NewTerm,
-                                     ?META_COMMITTED_SEQNO => Seqno},
-                                   State, Data),
-
-            publish_state(State, NewData),
-            announce_system_reprovisioned(NewData),
-            handle_new_config(NewData),
-            announce_committed_seqno(Seqno),
-
-            {keep_state, NewData, {reply, From, ok}};
-        {error, _} = Error ->
-            {keep_state_and_data, {reply, From, Error}}
-    end.
-
-check_reprovision(State, Data) ->
-    case check_provisioned(State) of
-        ok ->
-            Peer = get_pending_meta(?META_PEER, Data),
-            ConfigEntry = get_pending_config(Data),
-            Config = ConfigEntry#log_entry.value,
-            case chronicle_config:is_stable(Config) of
-                true ->
-                    Voters = chronicle_config:get_voters(Config),
-                    Replicas = chronicle_config:get_replicas(Config),
-
-                    case Voters =:= [Peer] andalso Replicas =:= [] of
-                        true ->
-                            {ok, Peer, Config};
-                        false ->
-                            {error, {bad_config, Peer, Config}}
-                    end;
-                false ->
-                    {error, {bad_config, Peer, Config}}
-            end;
-        Error ->
-            Error
-    end.
 
 handle_provision(Machines, From, State, Data) ->
     case check_not_provisioned(State) of
@@ -2461,9 +2378,6 @@ announce_joining_cluster(HistoryId) ->
 announce_system_provisioned(Data) ->
     announce_system_state(provisioned, build_metadata(Data)).
 
-announce_system_reprovisioned(Data) ->
-    announce_system_event(reprovisioned, build_metadata(Data)).
-
 announce_system_wiping() ->
     announce_system_event(wiping).
 
@@ -2595,9 +2509,6 @@ get_config(#data{storage = Storage}) ->
 
 get_committed_config(#data{storage = Storage}) ->
     chronicle_storage:get_committed_config(Storage).
-
-get_pending_config(#data{storage = Storage}) ->
-    chronicle_storage:get_pending_config(Storage).
 
 get_pending_committed_config(#data{storage = Storage}) ->
     chronicle_storage:get_pending_committed_config(Storage).
