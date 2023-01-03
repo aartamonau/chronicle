@@ -346,9 +346,10 @@ txn_reply(Snapshot) ->
 do_txn(Retries, Consistency, Ops) ->
     Gets = [Key || {get, Key} <- Ops],
     Sets = [Op || {set, _Key, _Value} = Op <- Ops],
-    Result = chronicle_kv:transaction(
-               kv, Gets,
-               fun (Snapshot) ->
+    Result = chronicle_kv:txn(
+               kv,
+               fun (Txn) ->
+                       Snapshot = chronicle_kv:txn_get_many(Gets, Txn),
                        case Sets of
                            [] ->
                                {abort, {ok, Snapshot}};
