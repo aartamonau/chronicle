@@ -185,11 +185,11 @@ simple_test__(Nodes) ->
                                                  [{set, a, 1234, Rev2}]),
 
                           {ok, _, blah} =
-                              chronicle_kv:transaction(
-                                kv, [a, c],
-                                fun (#{a := {A, _}, c := {C, _}}) ->
-                                        84 = A,
-                                        42 = C,
+                              chronicle_kv:txn(
+                                kv,
+                                fun (Txn) ->
+                                        {ok, {84 = A, _}} = chronicle_kv:txn_get(a, Txn),
+                                        {ok, {42, _}} = chronicle_kv:txn_get(c, Txn),
                                         {commit, [{set, a, A+1},
                                                   {delete, c}], blah}
                                 end,
@@ -255,29 +255,29 @@ simple_test__(Nodes) ->
                           {error, not_found} = chronicle_kv:get(kv, c),
 
                           ?assertError({bad_updates, _},
-                                       chronicle_kv:transaction(
-                                         kv, [a],
+                                       chronicle_kv:txn(
+                                         kv,
                                          fun (_) ->
                                                  {commit, sldkjflk}
                                          end)),
 
                           ?assertError({bad_updates, _},
-                                       chronicle_kv:transaction(
-                                         kv, [a],
+                                       chronicle_kv:txn(
+                                         kv,
                                          fun (_) ->
                                                  {commit, sldkjflk, extra}
                                          end)),
 
                           ?assertError({bad_updates, _},
-                                       chronicle_kv:transaction(
-                                         kv, [a],
+                                       chronicle_kv:txn(
+                                         kv,
                                          fun (_) ->
                                                  {commit, [sldkjflk], extra}
                                          end)),
 
                           ?assertError({bad_updates, _},
-                                       chronicle_kv:transaction(
-                                         kv, [a],
+                                       chronicle_kv:txn(
+                                         kv,
                                          fun (_) ->
                                                  {commit, [{set, {sldkjflk,v}}]}
                                          end)),

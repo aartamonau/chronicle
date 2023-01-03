@@ -30,7 +30,6 @@
 -export([update/3, update/4]).
 -export([delete/2, delete/3, delete/4]).
 -export([multi/2, multi/3]).
--export([transaction/3, transaction/4]).
 -export([get/2, get/3]).
 -export([rewrite/2, rewrite/3]).
 -export([get_snapshot/2, get_snapshot/3]).
@@ -181,8 +180,7 @@ multi(Name, Updates) ->
 -spec multi(name(), multi_ops(), options()) -> op_result().
 multi(Name, Updates, Opts) ->
     {TxnConditions, TxnUpdates} = multi_to_txn(Updates),
-    submit_transaction(Name, TxnConditions, TxnUpdates,
-                       get_timeout(Name, Opts)).
+    submit_txn(Name, TxnConditions, TxnUpdates, get_timeout(Name, Opts)).
 
 multi_to_txn(Updates) ->
     multi_to_txn_loop(Updates, [], []).
@@ -230,19 +228,6 @@ multi_to_txn_loop([Update | Updates], TxnConditions, TxnUpdates) ->
 -type txn_opaque() ::
         {txn_fast, Table::reference(), TableSeqno::chronicle:seqno()} |
         {txn_slow, snapshot()}.
-
--spec transaction(name(), [key()], txn_fun(snapshot())) -> txn_result().
-transaction(Name, Keys, Fun) ->
-    transaction(Name, Keys, Fun, #{}).
-
--spec transaction(name(), [key()], txn_fun(snapshot()), txn_options()) ->
-          txn_result().
-transaction(Name, Keys, Fun, Opts) ->
-    txn(Name,
-        fun (Txn) ->
-                Snapshot = txn_get_many(Keys, Txn),
-                Fun(Snapshot)
-        end, Opts).
 
 -spec txn_get(key(), txn_opaque()) -> get_result().
 txn_get(Key, Txn) ->
@@ -302,7 +287,7 @@ txn_loop(Name, BuildTxn, Opts, TRef, Retries) ->
 
 txn_loop_commit(Name, BuildTxn, Opts, TRef,
                 Retries, Updates, Conditions, Extra) ->
-    case submit_transaction(Name, Conditions, Updates, TRef) of
+    case submit_txn(Name, Conditions, Updates, TRef) of
         {ok, Revision} = Ok ->
             case Extra of
                 no_extra ->
@@ -351,8 +336,8 @@ prepare_txn_fast(Name, Fun) ->
             use_slow_path
     end.
 
-submit_transaction(Name, Conditions, Updates, Timeout) ->
-    submit_command(Name, {transaction, Conditions, Updates}, Timeout).
+submit_txn(Name, Conditions, Updates, Timeout) ->
+    submit_command(Name, {txn, Conditions, Updates}, Timeout).
 
 -type ro_txn_fun() :: fun ((txn_opaque()) -> TxnResult::any()).
 -type ro_txn_result() :: {ok, {TxnResult::any(), revision()}}.
@@ -599,10 +584,9 @@ apply_command(_, {set, Key, Value, ExpectedRevision}, Revision,
 apply_command(_, {delete, Key, ExpectedRevision}, Revision,
               StateRevision, State, Data) ->
     apply_delete(Key, ExpectedRevision, Revision, StateRevision, State, Data);
-apply_command(_, {transaction, Conditions, Updates}, Revision,
+apply_command(_, {txn, Conditions, Updates}, Revision,
               StateRevision, State, Data) ->
-    apply_transaction(Conditions, Updates,
-                      Revision, StateRevision, State, Data);
+    apply_txn(Conditions, Updates, Revision, StateRevision, State, Data);
 apply_command(_, _, _, _, State, Data) ->
     {reply, {error, unknown_command}, State, Data}.
 
@@ -768,28 +752,26 @@ apply_delete(Key, ExpectedRevision, Revision, StateRevision, State, Data) ->
             {reply, Error, State, Data}
     end.
 
-apply_transaction(Conditions, Updates, Revision, StateRevision, State, Data) ->
-    case check_transaction(Conditions, Updates,
+apply_txn(Conditions, Updates, Revision, StateRevision, State, Data) ->
+    case check_txn(Conditions, Updates,
                            Revision, StateRevision, State) of
         ok ->
-            NewState =
-                apply_transaction_updates(Updates, Revision, State, Data),
+            NewState = apply_txn_updates(Updates, Revision, State, Data),
             Reply = {ok, Revision},
             {reply, Reply, NewState, Data};
         {error, _} = Error ->
             {reply, Error, State, Data}
     end.
 
-check_transaction(Conditions, Updates, Revision, StateRevision, State) ->
-    case check_transaction_updates(Updates) of
+check_txn(Conditions, Updates, Revision, StateRevision, State) ->
+    case check_txn_updates(Updates) of
         ok ->
-            check_transaction_conditions(Conditions,
-                                         Revision, StateRevision, State);
+            check_txn_conditions(Conditions, Revision, StateRevision, State);
         {error, _} = Error ->
             Error
     end.
 
-check_transaction_updates(Updates) ->
+check_txn_updates(Updates) ->
     Valid =
         case is_list(Updates) of
             true ->
@@ -815,18 +797,18 @@ check_transaction_updates(Updates) ->
             {error, {raise, {bad_updates, Updates}}}
     end.
 
-check_transaction_conditions([], _, _, _) ->
+check_txn_conditions([], _, _, _) ->
     ok;
-check_transaction_conditions([Condition | Rest],
+check_txn_conditions([Condition | Rest],
                              Revision, StateRevision, State) ->
     case check_condition(Condition, Revision, StateRevision, State) of
         ok ->
-            check_transaction_conditions(Rest, Revision, StateRevision, State);
+            check_txn_conditions(Rest, Revision, StateRevision, State);
         {error, _} = Error ->
             Error
     end.
 
-apply_transaction_updates(Updates, Revision, State, Data) ->
+apply_txn_updates(Updates, Revision, State, Data) ->
     lists:foldl(
       fun (Update, AccState) ->
               case Update of
