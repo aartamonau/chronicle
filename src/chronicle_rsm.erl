@@ -229,8 +229,8 @@ format_peer_states(PeerStates) ->
     maps:to_list(
       maps:map(
         fun (_PeerId, #peer_state{incarnation = Incarnation,
-                                 min_serial = MinSerial,
-                                 replies = Replies}) ->
+                                  min_serial = MinSerial,
+                                  replies = Replies}) ->
                 [{"Incarnation", Incarnation},
                  {"Min serial", MinSerial},
                  {"Recent replies", Replies}]
