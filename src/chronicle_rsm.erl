@@ -362,8 +362,8 @@ handle_event(cast, {noop, PeerId, Incarnation, SeenSerial}, State, Data) ->
     handle_noop(PeerId, Incarnation, SeenSerial, State, Data);
 handle_event(cast, {leader_request, ReplyTo, Request}, State, Data) ->
     handle_leader_request(ReplyTo, Request, State, Data);
-handle_event(cast, {leader_request_result, Ref, Result}, State, Data) ->
-    handle_leader_request_result(Ref, Result, State, Data);
+handle_event(cast, {leader_request_result, Ref, Result}, _State, Data) ->
+    handle_leader_request_result(Ref, Result, Data);
 handle_event(info, {?RSM_TAG, request_timeout, Ref}, State, Data) ->
     handle_request_timeout(Ref, State, Data);
 handle_event(info, {?RSM_TAG, leader_down}, State, Data) ->
@@ -405,9 +405,6 @@ handle_call(Call, From, _State, _Data) ->
     ?WARNING("Unexpected call ~p", [Call]),
     {keep_state_and_data, [{reply, From, nack}]}.
 
-add_request(RawRequest, Deadline, ReplyTo, Field, Data) ->
-    add_request(make_ref(), RawRequest, Deadline, ReplyTo, Field, Data).
-
 add_request(Ref, RawRequest, Deadline, ReplyTo, Field, Data) ->
     TRef =
         case Deadline of
@@ -440,8 +437,8 @@ cancel_request_timer(#request{ref = Ref, tref = TRef}) ->
             ok
     end.
 
-add_leader_request(Request, Deadline, From, Data) ->
-    add_request(Request, Deadline, {from, From}, #data.leader_requests, Data).
+add_leader_request(Id, Request, Deadline, From, Data) ->
+    add_request(Id, Request, Deadline, {from, From}, #data.leader_requests, Data).
 
 get_requests_to_forward(#data{leader_requests = LeaderRequests,
                               min_serial_in_use = MinSerial,
@@ -564,7 +561,7 @@ handle_leader_request_command({command, Command}, Deadline, From, State,
                                     serials_in_use = Serials} = Data) ->
     SeenSerial = MinSerialInUse - 1,
     RawRequest = {command, PeerId, Incarnation, Serial, SeenSerial, Command},
-    {Request, NewData0} = add_leader_request(RawRequest, Deadline, From, Data),
+    {Request, NewData0} = add_leader_request(Serial, RawRequest, Deadline, From, Data),
 
     NewSerials = gb_trees:insert(Serial, Request#request.ref, Serials),
     NewSerial = Serial + 1,
@@ -580,7 +577,7 @@ handle_leader_request_command({command, Command}, Deadline, From, State,
     end.
 
 handle_leader_request_other(RawRequest, Deadline, From, State, Data) ->
-    {Request, NewData} = add_leader_request(RawRequest, Deadline, From, Data),
+    {Request, NewData} = add_leader_request(make_ref(), RawRequest, Deadline, From, Data),
     maybe_forward_leader_request(Request, State, NewData).
 
 get_forward_mode(State, Data) ->
@@ -642,42 +639,30 @@ handle_request_timeout(Ref, State, Data) ->
     {from, From} = Request#request.reply_to,
     {keep_state, NewData, [{reply, From, {error, timeout}} | Effects]}.
 
-handle_leader_request_result(Ref, Result, State, Data) ->
+handle_leader_request_result(Ref, Result, Data) ->
     case take_leader_request(Ref, Data) of
-        {#request{reply_to = ReplyTo} = Request, NewData0} ->
+        {#request{reply_to = ReplyTo} = Request, NewData} ->
             cancel_request_timer(Request),
-            {NewData, Effects} = maybe_update_serials(Request, State, NewData0),
             {from, From} = ReplyTo,
 
             case leader_request_sync_revision(Request, Result, From, NewData) of
                 {reply, Reply} ->
-                    {keep_state, NewData, [{reply, From, Reply} | Effects]};
+                    {keep_state, NewData, {reply, From, Reply}};
                 {noreply, FinalData} ->
-                    {keep_state, FinalData, Effects}
+                    {keep_state, FinalData}
             end;
         no_request ->
             keep_state_and_data
     end.
 
 leader_request_sync_revision(Request, Result, From, Data) ->
-    case Request#request.request of
-        {command, _, _, _, _, _} ->
-            case Result of
-                {ok, Revision, Reply} ->
-                    Deadline = Request#request.deadline,
-                    do_handle_sync_revision({ok, Reply},
-                                            Revision, Deadline, From, Data);
-                _ ->
-                    {reply, Result}
-            end;
-        sync ->
-            case Result of
-                {ok, Revision} ->
-                    Deadline = Request#request.deadline,
-                    do_handle_sync_revision(ok, Revision, Deadline, From, Data);
-                _ ->
-                    {reply, Result}
-            end
+    sync = Request#request.request,
+    case Result of
+        {ok, Revision} ->
+            Deadline = Request#request.deadline,
+            do_handle_sync_revision(ok, Revision, Deadline, From, Data);
+        _ ->
+            {reply, Result}
     end.
 
 handle_leader_down(State, #data{leader_last_retry = LastRetry,
@@ -815,40 +800,23 @@ reply_leader_request(ReplyTo, Reply, Effects) ->
 do_leader_request(Request, ReplyTo, State, Data) ->
     case Request of
         {command, PeerId, Incarnation, Serial, SeenSerial, Command} ->
-            handle_command(PeerId, Incarnation,
-                           Serial, SeenSerial, Command, ReplyTo, State, Data);
+            %% TODO: ReplyTo is currently unused here; this code will soon be gone
+            handle_command(PeerId, Incarnation, Serial, SeenSerial, Command, State, Data);
         sync ->
             handle_sync(ReplyTo, State, Data)
     end.
 
-handle_command(PeerId, Incarnation, Serial, SeenSerial, Command, ReplyTo,
+handle_command(PeerId, Incarnation, Serial, SeenSerial, Command,
                #leader{history_id = HistoryId, term = Term},
-               #data{name = Name} = Data) ->
-    case dedup_command(PeerId, Incarnation, Serial, Data) of
-        accept ->
-            Id = {PeerId, Incarnation, Serial},
-
-            %% We may be overriding an existing request. But that might only
-            %% happen if the client retransmits the request.
-            {_, NewData} = add_local_request(Id, command, ReplyTo, Data),
-
-            RSMCommand = #rsm_command{rsm_name = Name,
-                                      peer_id = PeerId,
-                                      peer_incarnation = Incarnation,
-                                      serial = Serial,
-                                      seen_serial = SeenSerial,
-                                      payload = {command, Command}},
-            chronicle_server:rsm_command(HistoryId, Term, RSMCommand),
-            {keep_state, NewData};
-        {reply, Reply} ->
-            {keep_state_and_data, reply_leader_request(ReplyTo, Reply)};
-        noreply ->
-            %% This is a retransmit of a command that is still pending
-            %% response.
-            Id = {PeerId, Incarnation, Serial},
-            {_, NewData} = add_local_request(Id, command, ReplyTo, Data),
-            {keep_state, NewData}
-    end.
+               #data{name = Name}) ->
+    RSMCommand = #rsm_command{rsm_name = Name,
+                              peer_id = PeerId,
+                              peer_incarnation = Incarnation,
+                              serial = Serial,
+                              seen_serial = SeenSerial,
+                              payload = {command, Command}},
+    chronicle_server:rsm_command(HistoryId, Term, RSMCommand),
+    keep_state_and_data.
 
 handle_noop(PeerId, Incarnation, SeenSerial,
             #leader{history_id = HistoryId, term = Term},
@@ -881,9 +849,6 @@ handle_noop(_, _, _, _, _) ->
     %% not leader
     keep_state_and_data.
 
-dedup_command(PeerId, Incarnation, Serial, Data) ->
-    dedup_command(PeerId, Incarnation, Serial, undefined, Data).
-
 dedup_command(PeerId, Incarnation, Serial, Peers, Data) ->
     case find_peer_state(PeerId, Incarnation, Data) of
         {ok, #peer_state{min_serial = MinSerial, replies = Replies}} ->
@@ -899,16 +864,11 @@ dedup_command(PeerId, Incarnation, Serial, Peers, Data) ->
                     {reply, {error, ambiguous_write}}
             end;
         not_found ->
-            case Peers of
-                undefined ->
+            case sets:is_element(PeerId, Peers) of
+                true ->
                     accept;
-                _ ->
-                    case sets:is_element(PeerId, Peers) of
-                        true ->
-                            accept;
-                        false ->
-                            {reply, {error, not_peer}}
-                    end
+                false ->
+                    {reply, {error, not_peer}}
             end;
         stale ->
             {reply, {error, ambiguous_write}}
@@ -1216,7 +1176,7 @@ apply_entry(Entry, {Data, Replies}) ->
         #config{} = NewConfig ->
             case chronicle_config:is_stable(NewConfig) of
                 true ->
-                    {ok, NewModState, NewModData, ExtraReplies0} =
+                    {ok, NewModState, NewModData, ExtraReplies} =
                         Mod:handle_config(Entry,
                                           Revision, AppliedRevision,
                                           ModState, ModData),
@@ -1227,8 +1187,6 @@ apply_entry(Entry, {Data, Replies}) ->
                                          config_peers = peer_ids(NewConfig),
                                          mod_state = NewModState,
                                          mod_data = NewModData},
-                    ExtraReplies =
-                        [{Id, {ok, Reply}} || {Id, Reply} <- ExtraReplies0],
                     NewData = record_delayed_replies(ExtraReplies, NewData0),
                     {prune_peer_states(NewData), ExtraReplies ++ Replies};
                 false ->
@@ -1257,9 +1215,8 @@ apply_command(RSMCommand, AppliedRevision, Revision, Replies,
                                        Revision, AppliedRevision,
                                        ModState, ModData) of
                     {reply, Reply0, NewModState0, NewModData0} ->
-                        Reply1 = {ok, Revision, Reply0},
-                        Replies0 = [{Id, Reply1} | Replies],
-                        {{reply, Reply1}, Replies0,
+                        Replies0 = [{Id, Reply0} | Replies],
+                        {{reply, Reply0}, Replies0,
                          NewModState0, NewModData0};
                     {noreply, NewModState0, NewModData0} ->
                         {noreply, Replies, NewModState0, NewModData0}
@@ -1316,21 +1273,30 @@ prune_peer_states(#data{peer_states = PeerStates,
           end, PeerStates),
     Data#data{peer_states = NewPeerStates}.
 
-pending_commands_reply(Replies, #leader{}, Data) ->
+pending_commands_reply(Replies, State,
+                       #data{peer_id = OurPeer, incarnation = OurIncarnation} = Data) ->
     lists:foldr(
-      fun ({Id, Reply}, Acc) ->
-              pending_command_reply(Id, Reply, Acc)
-      end, {Data, []}, Replies);
-pending_commands_reply(_Replies, _State, Data) ->
-    {Data, []}.
+      fun ({Id, Reply}, {AccData, AccEffects} = Acc) ->
+              {Peer, Incarnation, Serial} = Id,
+              %% reply if this command originated on our peer in the current incarnation
+              case OurPeer =:= Peer andalso OurIncarnation =:= Incarnation of
+                  true ->
+                      {NewAccData, Effects} = pending_command_reply(Serial, Reply, State, AccData),
+                      {NewAccData, Effects ++ AccEffects};
+                  false ->
+                      Acc
+              end
+      end, {Data, []}, Replies).
 
-pending_command_reply(Id, Reply, {Data, Effects} = Acc) ->
-    case take_local_request(Id, Data) of
-        {#request{reply_to = ReplyTo, request = command}, NewData} ->
-            NewEffects = reply_leader_request(ReplyTo, Reply, Effects),
-            {NewData, NewEffects};
+pending_command_reply(Serial, Reply, State, Data) ->
+    case take_leader_request(Serial, Data) of
+        {#request{reply_to = {from, From},
+                  request = {command, _, _, _, _, _}} = Request, NewData} ->
+            cancel_request_timer(Request),
+            gen_statem:reply(From, {ok, Reply}),
+            maybe_update_serials(Request, State, NewData);
         no_request ->
-            Acc
+            {Data, []}
     end.
 
 handle_leader_status(Status, State, Data) ->
@@ -1466,13 +1432,14 @@ read_log(EndSeqno, State, #data{read_seqno = ReadSeqno} = Data) ->
                    "Applying snapshot at seqno ~p",
                    [StartSeqno, EndSeqno, SnapshotSeqno]),
 
-            NewData = apply_snapshot(SnapshotSeqno, Config, Snapshot, Data),
+            {NewData, Effects} = apply_snapshot(SnapshotSeqno, Config, Snapshot, State, Data),
             case EndSeqno > SnapshotSeqno of
                 true ->
                     %% There are more entries to read.
-                    read_log(EndSeqno, State, NewData);
+                    {FinalData, ReadEffects} = read_log(EndSeqno, State, NewData),
+                    {FinalData, Effects ++ ReadEffects};
                 false ->
-                    {NewData, []}
+                    {NewData, Effects}
             end
     end.
 
@@ -1542,12 +1509,16 @@ get_snapshot(#data{name = Name}) ->
 maybe_restore_snapshot(Data) ->
     case get_snapshot(Data) of
         {ok, SnapshotSeqno, Config, Snapshot} ->
-            apply_snapshot(SnapshotSeqno, Config, Snapshot, Data);
+            %% maybe_restore_snapshot is only called when there are no
+            %% outstanding requests, so the returned effects must empty
+            {NewData, []} = apply_snapshot(SnapshotSeqno, Config, Snapshot, #no_leader{}, Data),
+            NewData;
         {no_snapshot, SnapshotSeqno, Config} ->
             Data#data{read_seqno = SnapshotSeqno, config = Config}
     end.
 
-apply_snapshot(Seqno, Config, Snapshot, Data) ->
+apply_snapshot(Seqno, Config, Snapshot, State,
+               #data{peer_id = Peer, incarnation = Incarnation} = Data) ->
     #snapshot{applied_history_id = AppliedHistoryId,
               applied_seqno = AppliedSeqno,
               mod_state = ModState,
@@ -1555,14 +1526,30 @@ apply_snapshot(Seqno, Config, Snapshot, Data) ->
     Revision = {AppliedHistoryId, AppliedSeqno},
     {ok, ModData} = call_callback(apply_snapshot, [Revision, ModState], Data),
 
-    Data#data{applied_history_id = AppliedHistoryId,
-              applied_seqno = AppliedSeqno,
-              read_seqno = Seqno,
-              mod_state = ModState,
-              mod_data = ModData,
-              config = Config,
-              config_peers = peer_ids(Config),
-              peer_states = PeerStates}.
+    {NewData0, Effects} =
+        case find_peer_state(Peer, Incarnation, Data) of
+            {ok, #peer_state{replies = Replies}} ->
+                maps:fold(
+                  fun (Serial, Reply, {AccData, AccEffects}) ->
+                          {NewAccData, Effects} =
+                              pending_command_reply(Serial, Reply, State, AccData),
+                          {NewAccData, Effects ++ AccEffects}
+                  end, {Data, []}, Replies);
+            stale ->
+                {Data, []}
+        end,
+
+    NewData =
+        NewData0#data{applied_history_id = AppliedHistoryId,
+                      applied_seqno = AppliedSeqno,
+                      read_seqno = Seqno,
+                      mod_state = ModState,
+                      mod_data = ModData,
+                      config = Config,
+                      config_peers = peer_ids(Config),
+                      peer_states = PeerStates},
+
+    {NewData, Effects}.
 
 peer_ids(Config) ->
     sets:from_list(chronicle_config:get_peer_ids(Config)).
