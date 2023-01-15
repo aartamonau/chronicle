@@ -633,13 +633,11 @@ read_full(Fd, Size) ->
     end.
 
 queue_foreach(Fun, Queue) ->
-    case queue:out(Queue) of
-        {empty, _} ->
-            ok;
-        {{value, Value}, NewQueue} ->
-            Fun(Value),
-            queue_foreach(Fun, NewQueue)
-    end.
+    queue:fold(
+      fun (Elem, Acc) ->
+              Fun(Elem),
+              Acc
+      end, unused, Queue).
 
 -ifdef(TEST).
 queue_foreach_test() ->
