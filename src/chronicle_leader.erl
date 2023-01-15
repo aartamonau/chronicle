@@ -831,7 +831,7 @@ maybe_reply_to_leader_waiters(LeaderInfo, Data) ->
     end.
 
 reply_to_leader_waiters(Reply, #data{leader_waiters = Waiters} = Data) ->
-    chronicle_utils:maps_foreach(
+    maps:foreach(
       fun (TRef, {From, _}) ->
               gen_statem:reply(From, Reply),
               _ = erlang:cancel_timer(TRef),
@@ -1093,7 +1093,7 @@ cancel_state_timer_tref(TRef, Name) ->
     end.
 
 cancel_all_state_timers(#data{state_timers = StateTimers} = Data) ->
-    chronicle_utils:maps_foreach(
+    maps:foreach(
       fun (Name, TRef) ->
               cancel_state_timer_tref(TRef, Name)
       end, StateTimers),

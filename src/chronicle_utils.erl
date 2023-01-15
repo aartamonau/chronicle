@@ -44,7 +44,6 @@
          create_marker/1, create_marker/2, delete_marker/1,
          mkdir_p/1, check_file_exists/2, delete_recursive/1,
          read_full/2,
-         maps_foreach/2,
          queue_foreach/2, queue_takefold/3,
          queue_takewhile/2, queue_dropwhile/2,
          log_entry_revision/1,
@@ -632,31 +631,6 @@ read_full(Fd, Size) ->
         Other ->
             Other
     end.
-
-maps_foreach(Fun, Map) ->
-    maps_foreach_loop(Fun, maps:iterator(Map)).
-
-maps_foreach_loop(Fun, MapIter) ->
-    case maps:next(MapIter) of
-        none ->
-            ok;
-        {Key, Value, NewMapIter} ->
-            Fun(Key, Value),
-            maps_foreach_loop(Fun, NewMapIter)
-    end.
-
--ifdef(TEST).
-maps_foreach_test() ->
-    Map = #{1 => 2, 3 => 4, 5 => 6},
-    Ref = make_ref(),
-    erlang:put(Ref, []),
-    maps_foreach(
-      fun (Key, Value) ->
-              erlang:put(Ref, [{Key, Value} | erlang:get(Ref)])
-      end, Map),
-    Elems = erlang:erase(Ref),
-    ?assertEqual(lists:sort(maps:to_list(Map)), lists:sort(Elems)).
--endif.
 
 queue_foreach(Fun, Queue) ->
     case queue:out(Queue) of

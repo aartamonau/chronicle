@@ -310,7 +310,7 @@ handle_snapshot_failed(RSM, #state{pending_snapshot = Snapshot} = State) ->
     {noreply, State#state{pending_snapshot = undefined}}.
 
 cancel_savers(Savers) ->
-    chronicle_utils:maps_foreach(
+    maps:foreach(
       fun (Pid, _RSM) ->
               chronicle_utils:terminate_linked_process(Pid, kill)
       end, Savers),

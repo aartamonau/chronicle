@@ -541,7 +541,7 @@ apply_snapshot(SnapshotRevision, SnapshotState, _OldRevision, OldState,
                      kv_table = OldKvTable,
                      initialized = Initialized} = Data) ->
     KvTable = create_kv_table(Name),
-    chronicle_utils:maps_foreach(
+    maps:foreach(
       fun (Key, ValueRev) ->
               true = ets:insert_new(KvTable, {Key, ValueRev})
       end, SnapshotState),
@@ -877,7 +877,7 @@ notify_snapshot_installed(Revision, Data) ->
 
 notify_snapshot_diff(Revision, NewSnapshot, OldSnapshot,
                      #data{initialized = true, event_mgr = Mgr}) ->
-    chronicle_utils:maps_foreach(
+    maps:foreach(
       fun (Key, {Value, Rev}) ->
               Notify =
                   case maps:find(Key, OldSnapshot) of
@@ -900,7 +900,7 @@ notify_snapshot_diff(Revision, NewSnapshot, OldSnapshot,
               end
       end, NewSnapshot),
 
-    chronicle_utils:maps_foreach(
+    maps:foreach(
       fun (Key, _) ->
               case maps:is_key(Key, NewSnapshot) of
                   true ->
