@@ -616,47 +616,13 @@ check_file_exists(Path, Type) ->
     end.
 
 delete_recursive(Path) ->
-    case filelib:is_dir(Path) of
-        true ->
-            case file:list_dir(Path) of
-                {ok, Children} ->
-                    delete_recursive_loop(Path, Children);
-                {error, enoent} ->
-                    ok;
-                {error, Error} ->
-                    {error, {Error, Path}}
-            end;
-        false ->
-            delete(Path, regular)
-    end.
-
-delete_recursive_loop(Dir, []) ->
-    delete(Dir, directory);
-delete_recursive_loop(Dir, [Path|Paths]) ->
-    FullPath = filename:join(Dir, Path),
-    case delete_recursive(FullPath) of
-        ok ->
-            delete_recursive_loop(Dir, Paths);
-        {error, _} = Error ->
-            Error
-    end.
-
-delete(Path, Type) ->
-    Result =
-        case Type of
-            directory ->
-                file:del_dir(Path);
-            regular ->
-                file:delete(Path)
-        end,
-
-    case Result of
+    case file:del_dir_r(Path) of
         ok ->
             ok;
         {error, enoent} ->
             ok;
-        {error, Error} ->
-            {error, {Error, Path}}
+        Error ->
+            Error
     end.
 
 read_full(Fd, Size) ->
