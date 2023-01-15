@@ -20,7 +20,7 @@
 -include("chronicle.hrl").
 
 -export([start_link/0]).
--export([server_ref/2,
+-export([server_ref/1,
          get_system_state/0, get_metadata/0,
          get_peer_info/0, get_peer_infos/1,
          check_grant_vote/2,
@@ -131,14 +131,9 @@ start_link() ->
 
 -type server_ref() :: any().
 
--spec server_ref(chronicle:peer(), chronicle:peer()) -> server_ref().
-server_ref(Peer, SelfPeer) ->
-    case Peer =:= SelfPeer of
-        true ->
-            ?SERVER;
-        false ->
-            ?SERVER_NAME(Peer, ?NAME)
-    end.
+-spec server_ref(chronicle:peer()) -> server_ref().
+server_ref(Peer) ->
+    ?SERVER(Peer).
 
 -spec get_system_state() ->
           not_provisioned |

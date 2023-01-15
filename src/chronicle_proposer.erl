@@ -285,9 +285,8 @@ handle_state_enter(proposing,
     announce_proposer_ready(Data),
     keep_state_and_data.
 
-start_catchup_process(#data{peer = Self,
-                            history_id = HistoryId, term = Term} = Data) ->
-    case chronicle_catchup:start_link(Self, HistoryId, Term) of
+start_catchup_process(#data{history_id = HistoryId, term = Term} = Data) ->
+    case chronicle_catchup:start_link(HistoryId, Term) of
         {ok, Pid} ->
             Data#data{catchup_pid = Pid};
         {error, Error} ->
@@ -1543,8 +1542,7 @@ maybe_send_requests_connected(Peers, Data, Fun) ->
       fun (Peer) ->
               case get_peer_monitor(Peer, Data) of
                   {ok, Ref} ->
-                      ServerRef =
-                          chronicle_agent:server_ref(Peer, Data#data.peer),
+                      ServerRef = chronicle_agent:server_ref(Peer),
                       case Fun(Peer, Ref, ServerRef) of
                           true ->
                               false;
@@ -1903,9 +1901,7 @@ log_busy_peers(Op, BusyPeers) ->
 reply_request(ReplyTo, Reply) ->
     chronicle_server:reply_request(ReplyTo, Reply).
 
-monitor_agents(Peers,
-               #data{peer = Self,
-                     monitors_peers = MPeers, monitors_refs = MRefs} = Data) ->
+monitor_agents(Peers, #data{monitors_peers = MPeers, monitors_refs = MRefs} = Data) ->
     {NewMPeers, NewMRefs} =
         lists:foldl(
           fun (Peer, {AccMPeers, AccMRefs} = Acc) ->
@@ -1914,7 +1910,7 @@ monitor_agents(Peers,
                           %% already monitoring
                           Acc;
                       false ->
-                          ServerRef = chronicle_agent:server_ref(Peer, Self),
+                          ServerRef = chronicle_agent:server_ref(Peer),
                           MRef = chronicle_utils:monitor_process(ServerRef, [{alias, demonitor}]),
                           {AccMPeers#{Peer => MRef}, AccMRefs#{MRef => Peer}}
                   end

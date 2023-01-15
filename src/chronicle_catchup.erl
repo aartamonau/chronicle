@@ -17,7 +17,7 @@
 
 -behavior(gen_server).
 
--export([start_link/3]).
+-export([start_link/2]).
 -export([catchup_peer/5, cancel_catchup/2, stop/1]).
 
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
@@ -29,15 +29,13 @@
 -define(MAX_PARALLEL_CATCHUPS,
         chronicle_settings:get({catchup, max_parallel_catchups}, 4)).
 
--record(state, { peer,
-                 history_id,
+-record(state, { history_id,
                  term,
                  pids,
                  pending }).
 
-start_link(Peer, HistoryId, Term) ->
-    gen_server:start_link(?START_NAME(?MODULE), ?MODULE,
-                          [Peer, HistoryId, Term], []).
+start_link(HistoryId, Term) ->
+    gen_server:start_link(?START_NAME(?MODULE), ?MODULE, [HistoryId, Term], []).
 
 catchup_peer(Pid, Alias, Opaque, Peer, PeerSeqno) ->
     gen_server:cast(Pid, {catchup_peer, Alias, Opaque, Peer, PeerSeqno}).
@@ -50,9 +48,8 @@ stop(Pid) ->
     ok = chronicle_utils:wait_for_process(Pid, 1000).
 
 %% callbacks
-init([Peer, HistoryId, Term]) ->
-    {ok, #state{peer = Peer,
-                history_id = HistoryId,
+init([HistoryId, Term]) ->
+    {ok, #state{history_id = HistoryId,
                 term = Term,
                 pids = #{},
                 pending = queue:new()}}.
@@ -79,10 +76,9 @@ terminate(_Reason, State) ->
     terminate_children(State).
 
 %% internal
-handle_catchup_peer(Alias, Opaque, Peer, PeerSeqno,
-                    #state{peer = Self, pending = Pending} = State) ->
+handle_catchup_peer(Alias, Opaque, Peer, PeerSeqno, #state{pending = Pending} = State) ->
     %% We should never catchup ourselves
-    true = (Peer =/= Self),
+    true = (Peer =/= ?PEER()),
 
     NewPending = queue:in({Peer, PeerSeqno, Alias, Opaque}, Pending),
     NewState0 = State#state{pending = NewPending},
@@ -201,8 +197,8 @@ install_snapshot(Peer,
                  {SnapshotSeqno,
                   SnapshotHistoryId, SnapshotTerm,
                   SnapshotConfig, RSMSnapshots},
-                 #state{peer = Self, history_id = HistoryId, term = Term}) ->
-    ServerRef = chronicle_agent:server_ref(Peer, Self),
+                 #state{history_id = HistoryId, term = Term}) ->
+    ServerRef = chronicle_agent:server_ref(Peer),
     chronicle_agent:install_snapshot(ServerRef, HistoryId, Term,
                                      SnapshotSeqno,
                                      SnapshotHistoryId, SnapshotTerm,
@@ -220,8 +216,8 @@ send_entries(Peer, AtTerm, AtSeqno, State) ->
     end.
 
 append(Peer, CommittedSeqno, AtTerm, AtSeqno, Entries,
-       #state{peer = Self, history_id = HistoryId, term = Term}) ->
-    ServerRef = chronicle_agent:server_ref(Peer, Self),
+       #state{history_id = HistoryId, term = Term}) ->
+    ServerRef = chronicle_agent:server_ref(Peer),
     case chronicle_agent:append(ServerRef, HistoryId, Term,
                                 CommittedSeqno, AtTerm, AtSeqno, Entries) of
         ok ->
