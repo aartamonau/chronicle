@@ -873,6 +873,9 @@ record_delayed_reply({PeerId, Incarnation, Serial}, Reply,
                     Data
             end;
         stale ->
+            Data;
+        not_found ->
+            %% The peer may no longer be part of the topology.
             Data
     end.
 
