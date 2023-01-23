@@ -108,8 +108,6 @@
                 leader_backoff,
                 leader_last_retry,
 
-                local_requests,
-
                 config :: undefined | #config{},
                 config_peers :: sets:set(chronicle:peer_id()),
                 peer_states :: peer_states(),
@@ -254,8 +252,6 @@ sanitize_event({call, _} = Type,
     end;
 sanitize_event(cast, {leader_request, ReplyTo, _}) ->
     {cast, {leader_request, ReplyTo, '...'}};
-sanitize_event(cast, {leader_request_result, Ref, _}) ->
-    {cast, {leader_request_result, Ref, '...'}};
 sanitize_event({call, _} = Type, {query, _}) ->
     {Type, {query, '...'}};
 sanitize_event(Type, Event) ->
@@ -288,7 +284,6 @@ init([Name, PeerId, Mod, ModArgs]) ->
                           read_seqno = ?NO_SEQNO,
                           sync_revision_requests = gb_trees:empty(),
                           leader_requests = #{},
-                          local_requests = #{},
 
                           config = undefined,
                           config_peers = sets:new(),
@@ -362,14 +357,12 @@ handle_event(cast, {noop, PeerId, Incarnation, SeenSerial}, State, Data) ->
     handle_noop(PeerId, Incarnation, SeenSerial, State, Data);
 handle_event(cast, {leader_request, ReplyTo, Request}, State, Data) ->
     handle_leader_request(ReplyTo, Request, State, Data);
-handle_event(cast, {leader_request_result, Ref, Result}, _State, Data) ->
-    handle_leader_request_result(Ref, Result, Data);
 handle_event(info, {?RSM_TAG, request_timeout, Ref}, State, Data) ->
     handle_request_timeout(Ref, State, Data);
 handle_event(info, {?RSM_TAG, leader_down}, State, Data) ->
     handle_leader_down(State, Data);
-handle_event(info, {{?RSM_TAG, sync_quorum, ReplyTo}, Result}, State, Data) ->
-    handle_sync_quorum_result(ReplyTo, Result, State, Data);
+handle_event(info, {{?RSM_TAG, sync_quorum, Ref}, Result}, _State, Data) ->
+    handle_sync_quorum_result(Ref, Result, Data);
 handle_event(info, {?RSM_TAG, sync_revision_timeout, Request}, State, Data) ->
     handle_sync_revision_timeout(Request, State, Data);
 handle_event(info, {'EXIT', Pid, _}, _State, #data{leader_sender = Sender})
@@ -399,8 +392,8 @@ handle_call({query, Query}, From, State, Data) ->
     handle_query(Query, From, State, Data);
 handle_call(get_local_revision, From, State, Data) ->
     handle_get_local_revision(From, State, Data);
-handle_call({sync_revision, Revision, Deadline}, From, State, Data) ->
-    handle_sync_revision(Revision, Deadline, From, State, Data);
+handle_call({sync_revision, Revision, Deadline}, From, _State, Data) ->
+    handle_sync_revision(Revision, Deadline, From, Data);
 handle_call(Call, From, _State, _Data) ->
     ?WARNING("Unexpected call ~p", [Call]),
     {keep_state_and_data, [{reply, From, nack}]}.
@@ -522,12 +515,6 @@ maybe_update_serials(#request{request = Request},
             {Data, []}
     end.
 
-add_local_request(Request, ReplyTo, Data) ->
-    add_local_request(make_ref(), Request, ReplyTo, Data).
-
-add_local_request(Id, Request, ReplyTo, Data) ->
-    add_request(Id, Request, infinity, ReplyTo, #data.local_requests, Data).
-
 take_request(Ref, Field, Data) ->
     Requests = element(Field, Data),
     case maps:take(Ref, Requests) of
@@ -540,16 +527,13 @@ take_request(Ref, Field, Data) ->
 take_leader_request(Ref, Data) ->
     take_request(Ref, #data.leader_requests, Data).
 
-take_local_request(Ref, Data) ->
-    take_request(Ref, #data.local_requests, Data).
-
 handle_leader_request_call(RawRequest, Deadline, From, State, Data) ->
     case RawRequest of
         {command, _} ->
             handle_leader_request_command(RawRequest,
                                           Deadline, From, State, Data);
-        _ ->
-            handle_leader_request_other(RawRequest, Deadline, From, State, Data)
+        sync ->
+            handle_leader_request_sync(Deadline, From, State, Data)
     end.
 
 handle_leader_request_command({command, Command}, Deadline, From, State,
@@ -576,8 +560,9 @@ handle_leader_request_command({command, Command}, Deadline, From, State,
             {keep_state, NewData}
     end.
 
-handle_leader_request_other(RawRequest, Deadline, From, State, Data) ->
-    {Request, NewData} = add_leader_request(make_ref(), RawRequest, Deadline, From, Data),
+handle_leader_request_sync(Deadline, From, State, Data) ->
+    Ref = make_ref(),
+    {Request, NewData} = add_leader_request(Ref, sync, Deadline, From, Data),
     maybe_forward_leader_request(Request, State, NewData).
 
 get_forward_mode(State, Data) ->
@@ -598,7 +583,13 @@ get_forward_mode(State, Data) ->
 maybe_forward_leader_request(Request, State, Data) ->
     case get_forward_mode(State, Data) of
         local ->
-            {keep_state, Data, leader_request_next_event(Request)};
+            case Request#request.request of
+                sync ->
+                    send_sync_quorum(?PEER(), self(), Request),
+                    {keep_state, Data};
+                _ ->
+                    {keep_state, Data, leader_request_next_event(Request)}
+            end;
         remote ->
             leader_sender_forward(Data#data.leader_sender, Request),
             {keep_state, Data};
@@ -621,7 +612,16 @@ maybe_forward_pending_leader_requests(Effects, State, Data) ->
 maybe_forward_requests(Requests, State, Data) ->
     case get_forward_mode(State, Data) of
         local ->
-            [leader_request_next_event(Request) || Request <- Requests];
+            lists:filtermap(
+              fun (Request) ->
+                      case Request#request.request of
+                          sync ->
+                              send_sync_quorum(?PEER(), self(), Request),
+                              false;
+                          _ ->
+                              {true, leader_request_next_event(Request)}
+                      end
+              end, Requests);
         remote ->
             Sender = Data#data.leader_sender,
             lists:foreach(
@@ -638,32 +638,6 @@ handle_request_timeout(Ref, State, Data) ->
     {NewData, Effects} = maybe_update_serials(Request, State, NewData0),
     {from, From} = Request#request.reply_to,
     {keep_state, NewData, [{reply, From, {error, timeout}} | Effects]}.
-
-handle_leader_request_result(Ref, Result, Data) ->
-    case take_leader_request(Ref, Data) of
-        {#request{reply_to = ReplyTo} = Request, NewData} ->
-            cancel_request_timer(Request),
-            {from, From} = ReplyTo,
-
-            case leader_request_sync_revision(Request, Result, From, NewData) of
-                {reply, Reply} ->
-                    {keep_state, NewData, {reply, From, Reply}};
-                {noreply, FinalData} ->
-                    {keep_state, FinalData}
-            end;
-        no_request ->
-            keep_state_and_data
-    end.
-
-leader_request_sync_revision(Request, Result, From, Data) ->
-    sync = Request#request.request,
-    case Result of
-        {ok, Revision} ->
-            Deadline = Request#request.deadline,
-            do_handle_sync_revision(ok, Revision, Deadline, From, Data);
-        _ ->
-            {reply, Result}
-    end.
 
 handle_leader_down(State, #data{leader_last_retry = LastRetry,
                                 leader_sender = Sender} = Data) ->
@@ -758,19 +732,26 @@ leader_sender_cast(Sender, Cast) ->
 leader_sender(Leader, Parent, #data{name = Name}) ->
     ServerRef = ?SERVER(Leader, Name),
     MRef = chronicle_utils:monitor_process(ServerRef),
-    leader_sender_loop(ServerRef, Parent, MRef).
+    leader_sender_loop(ServerRef, Leader, Parent, MRef).
 
-leader_sender_loop(ServerRef, Parent, MRef) ->
+leader_sender_loop(ServerRef, Leader, Parent, MRef) ->
     receive
         {'DOWN', MRef, _, _, _} ->
             Parent ! {?RSM_TAG, leader_down};
+        {request, #request{request = sync} = Request} ->
+            send_sync_quorum(Leader, Parent, Request),
+            leader_sender_loop(ServerRef, Leader, Parent, MRef);
         {request, Request} ->
             send_leader_request(ServerRef, Parent, Request),
-            leader_sender_loop(ServerRef, Parent, MRef);
+            leader_sender_loop(ServerRef, Leader, Parent, MRef);
         {cast, Cast} ->
             gen_statem:cast(ServerRef, Cast),
-            leader_sender_loop(ServerRef, Parent, MRef)
+            leader_sender_loop(ServerRef, Leader, Parent, MRef)
     end.
+
+send_sync_quorum(Leader, Parent, #request{ref = Ref, request = sync}) ->
+    Tag = {?RSM_TAG, sync_quorum, Ref},
+    chronicle_server:sync_quorum(Leader, Parent, Tag).
 
 send_leader_request(ServerRef, Parent,
                     #request{ref = RequestRef, request = Request}) ->
@@ -785,26 +766,10 @@ handle_leader_request(ReplyTo, Request, State, Data) ->
             keep_state_and_data
     end.
 
-reply_leader_request(ReplyTo, Reply) ->
-    reply_leader_request(ReplyTo, Reply, []).
-
-reply_leader_request(ReplyTo, Reply, Effects) ->
-    case ReplyTo of
-        {cast, Pid, Tag} ->
-            gen_statem:cast(Pid, {leader_request_result, Tag, Reply}),
-            Effects;
-        {internal, Tag} ->
-            [{next_event, cast, {leader_request_result, Tag, Reply}} | Effects]
-    end.
-
-do_leader_request(Request, ReplyTo, State, Data) ->
-    case Request of
-        {command, PeerId, Incarnation, Serial, SeenSerial, Command} ->
-            %% TODO: ReplyTo is currently unused here; this code will soon be gone
-            handle_command(PeerId, Incarnation, Serial, SeenSerial, Command, State, Data);
-        sync ->
-            handle_sync(ReplyTo, State, Data)
-    end.
+do_leader_request(Request, _ReplyTo, State, Data) ->
+    {command, PeerId, Incarnation, Serial, SeenSerial, Command} = Request,
+    %% TODO: ReplyTo is currently unused here; this code will soon be gone
+    handle_command(PeerId, Incarnation, Serial, SeenSerial, Command, State, Data).
 
 handle_command(PeerId, Incarnation, Serial, SeenSerial, Command,
                #leader{history_id = HistoryId, term = Term},
@@ -959,29 +924,21 @@ find_peer_state(PeerId, Incarnation, #data{peer_states = PeerStates}) ->
             not_found
     end.
 
-handle_sync(ReplyTo, State, Data) ->
-    {keep_state, sync_quorum(ReplyTo, State, Data)}.
-
-sync_quorum(ReplyTo, #leader{history_id = HistoryId, term = Term}, Data) ->
-    {Request, NewData} = add_local_request(sync_quorum, ReplyTo, Data),
-    Tag = {?RSM_TAG, sync_quorum, Request#request.ref},
-    chronicle_server:sync_quorum(Tag, HistoryId, Term),
-    NewData.
-
-handle_sync_quorum_result(Ref, Result, State, Data) ->
-    case take_local_request(Ref, Data) of
-        {#request{reply_to = ReplyTo,
-                  request = sync_quorum}, NewData} ->
-            case Result of
-                {ok, _Revision} ->
-                    #leader{} = State,
-                    {keep_state, NewData,
-                     reply_leader_request(ReplyTo, Result)};
-                {error, {leader_error, _}} ->
-                    {keep_state, NewData}
-            end;
-        no_request ->
-            keep_state_and_data
+handle_sync_quorum_result(Ref, Result, Data) ->
+    case Result of
+        {error, {leader_error, _}} ->
+            %% we'll retry this request if it hasn't expired yet
+            keep_state_and_data;
+        {ok, Revision} ->
+            case take_leader_request(Ref, Data) of
+                {#request{reply_to = {from, From},
+                          request = sync,
+                          deadline = Deadline} = Request, NewData} ->
+                    cancel_request_timer(Request),
+                    handle_sync_revision(Revision, Deadline, From, NewData);
+                no_request ->
+                    keep_state_and_data
+            end
     end.
 
 handle_query(Query, From, _State, Data) ->
@@ -993,26 +950,25 @@ handle_get_local_revision(From, _State,
                                 applied_seqno = Seqno}) ->
     {keep_state_and_data, {reply, From, {HistoryId, Seqno}}}.
 
-handle_sync_revision(Revision, Deadline, From, _State, Data) ->
-    case do_handle_sync_revision(ok, Revision, Deadline, From, Data) of
+handle_sync_revision(Revision, Deadline, From, Data) ->
+    case do_handle_sync_revision(Revision, Deadline, From, Data) of
         {reply, Reply} ->
             {keep_state_and_data, {reply, From, Reply}};
         {noreply, NewData} ->
             {keep_state, NewData}
     end.
 
-do_handle_sync_revision(OkReply, {_, Seqno} = Revision, Deadline, From,
+do_handle_sync_revision({_, Seqno} = Revision, Deadline, From,
                         #data{read_seqno = ReadSeqno, config = Config} =
                             Data) ->
     case check_revision_compatible(Revision, ReadSeqno, Config) of
         ok ->
             case Seqno =< ReadSeqno of
                 true ->
-                    {reply, OkReply};
+                    {reply, ok};
                 false ->
                     {noreply,
-                     sync_revision_add_request(OkReply, Seqno,
-                                               Revision, Deadline, From, Data)}
+                     sync_revision_add_request(ok, Seqno, Revision, Deadline, From, Data)}
             end;
         {error, _} = Error ->
             {reply, Error}
@@ -1345,18 +1301,6 @@ spawn_leader_sender(State, Data) ->
 
 cleanup_after_leader(State, Data) ->
     case State of
-        #leader{} ->
-            %% By the time chronicle_rsm receives the notification that the
-            %% term has finished, it must have already processed all
-            %% notifications from chronicle_agent about commands that are
-            %% known to have been committed by the outgoing leader. So there's
-            %% not a need to synchronize with chronicle_agent as it was done
-            %% previously.
-
-            %% For simplicity, we don't respond to inflight commands. This is
-            %% because eventually all other nodes should realize that this
-            %% node is not the leader anymore and will retry the requests.
-            Data#data{local_requests = #{}};
         #follower{} ->
             Sender = Data#data.leader_sender,
 

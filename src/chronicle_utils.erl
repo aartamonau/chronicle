@@ -26,7 +26,7 @@
          terminate/2, wait_for_process/2,
          terminate_and_wait/2, terminate_linked_process/2,
          next_term/2,
-         send/3,
+         send/2, send/3,
          call/2, call/3, call/4,
          send_requests/3, multi_call/4, multi_call/5,
          start_timeout/1, read_timeout/1, read_deadline/1,
@@ -149,6 +149,10 @@ next_term({TermNo, _}, Peer) ->
 
 -type send_options() :: [nosuspend | noconnect].
 -type send_result() :: ok | nosuspend | noconnect.
+
+-spec send(any(), any()) -> send_result().
+send(Name, Msg) ->
+    send(Name, Msg, []).
 
 -spec send(any(), any(), send_options()) -> send_result().
 -ifdef(TEST).

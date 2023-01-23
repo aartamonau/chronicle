@@ -56,8 +56,8 @@ register_rsm(Name, Pid) ->
 cas_config(NewConfig, CasRevision) ->
     gen_statem:cast(?SERVER, {cas_config, NewConfig, CasRevision}).
 
-sync_quorum(Tag, HistoryId, Term) ->
-    gen_statem:cast(?SERVER, {sync_quorum, self(), Tag, HistoryId, Term}).
+sync_quorum(Peer, Pid, Tag) ->
+    chronicle_utils:send(?SERVER(Peer), {sync_quorum, Pid, Tag}).
 
 %% Used locally by corresponding chronicle_rsm instance.
 rsm_command(HistoryId, Term, Command) ->
@@ -143,16 +143,16 @@ handle_event(info, {proposer_msg, Msg}, #leader{} = State, Data) ->
     handle_proposer_msg(Msg, State, Data);
 handle_event(info, {batch_ready, BatchField}, State, Data) ->
     handle_batch_ready(BatchField, State, Data);
+handle_event(info, {sync_quorum, Pid, Tag}, State, Data) ->
+    ReplyTo = {send, Pid, Tag},
+    batch_leader_request(sync_quorum, any,
+                         ReplyTo, #data.syncs_batch, State, Data);
 handle_event({call, From}, {register_rsm, Name, Pid}, State, Data) ->
     handle_register_rsm(Name, Pid, From, State, Data);
 handle_event(cast, {cas_config, Config, Revision}, State, Data) ->
     handle_cas_config(Config, Revision, State, Data);
 handle_event(cast, {rsm_command, HistoryId, Term, RSMCommand}, State, Data) ->
     handle_rsm_command(HistoryId, Term, RSMCommand, State, Data);
-handle_event(cast, {sync_quorum, Pid, Tag, HistoryId, Term}, State, Data) ->
-    ReplyTo = {send, Pid, Tag},
-    batch_leader_request(sync_quorum, {HistoryId, Term},
-                         ReplyTo, #data.syncs_batch, State, Data);
 handle_event({call, From}, _Call, _State, _Data) ->
     {keep_state_and_data, {reply, From, nack}};
 handle_event(Type, Event, _State, _Data) ->
