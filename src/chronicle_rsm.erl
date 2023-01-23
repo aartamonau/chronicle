@@ -1482,7 +1482,8 @@ apply_snapshot(Seqno, Config, Snapshot, State,
                               pending_command_reply(Serial, Reply, State, AccData),
                           {NewAccData, Effects ++ AccEffects}
                   end, {Data, []}, Replies);
-            stale ->
+            not_found ->
+                %% the snapshot may be from before the peer was added
                 {Data, []}
         end,
 
